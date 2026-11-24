@@ -111,8 +111,9 @@ def install_crash_logging():
 
 class State:
     def __init__(self, root: Path, tex: Path, engine: str, model: str | None):
-        self.root = root            # project folder (what the file tree shows, where Claude works)
-        self.tex = tex              # main document (what gets compiled)
+        # Resolved, so paths compare correctly when a folder is reached through a link (macOS /tmp, Windows short names)
+        self.root = Path(root).resolve()   # project folder (what the file tree shows, where Claude works)
+        self.tex = Path(tex).resolve()     # main document (what gets compiled)
         self.engine = engine
         self.model = model
         self.lock = threading.Lock()

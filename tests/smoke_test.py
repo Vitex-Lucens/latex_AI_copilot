@@ -85,7 +85,7 @@ def wait_for_server(port, proc, seconds=180):
 
 
 def main():
-    tmp = Path(tempfile.mkdtemp(prefix="texann-smoke-"))
+    tmp = Path(tempfile.mkdtemp(prefix="texann-smoke-"))   # deliberately not resolved: the app must cope
     proj = tmp / "project"
     proj.mkdir()
     (proj / "main.tex").write_text(SAMPLE, encoding="utf-8")
@@ -148,5 +148,17 @@ def main():
     print("\nAll smoke tests passed.")
 
 
+def annotate(title: str, text: str):
+    """Show an error on the GitHub Actions run page (logs there need a login; annotations don't)."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        text = "\n".join(text.strip().splitlines()[-40:])
+        print(f"::error title={title}::" + text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"), flush=True)
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException:
+        import traceback
+        annotate(f"Smoke test failed on {sys.platform}", traceback.format_exc())
+        raise

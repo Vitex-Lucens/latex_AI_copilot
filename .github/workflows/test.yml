@@ -56,15 +56,34 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install miktex ghostscript --no-progress -y
-          if (-not (Get-Command perl -ErrorAction SilentlyContinue)) { choco install strawberryperl --no-progress -y }
+          $ErrorActionPreference = "Continue"
+          # Each step's output goes into an annotation if it fails (the run page shows those without a login).
+          function Step([string]$what, [scriptblock]$cmd) {
+            Write-Host "--- $what"
+            $out = & $cmd 2>&1 | Out-String
+            Write-Host $out
+            if ($LASTEXITCODE -ne 0) {
+              $tail = (($out.Trim() -split "`r?`n") | Select-Object -Last 40) -join "`n"
+              $msg = "$what (exit $LASTEXITCODE)`n$tail"
+              Write-Host ("::error title=Windows TeX setup::" + $msg.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A"))
+              exit 1
+            }
+          }
+          Step "choco install miktex ghostscript" { choco install miktex ghostscript --no-progress -y }
+          if (-not (Get-Command perl -ErrorAction SilentlyContinue)) {
+            Step "choco install strawberryperl" { choco install strawberryperl --no-progress -y }
+          }
           $bin = "C:\Program Files\MiKTeX\miktex\bin\x64"
+          if (-not (Test-Path "$bin\latexmk.exe")) {
+            $found = Get-ChildItem "C:\Program Files\MiKTeX", "$env:LOCALAPPDATA\Programs\MiKTeX" -Recurse -Filter latexmk.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $bin = $found.DirectoryName }
+          }
           $env:Path = "$bin;$env:Path"
           Add-Content -Path $env:GITHUB_PATH -Value $bin
-          initexmf --admin --set-config-value=[MPM]AutoInstall=1
-          initexmf --set-config-value=[MPM]AutoInstall=1
-          miktex --admin packages update-package-database
-          latexmk --version
+          Step "initexmf --admin AutoInstall" { initexmf --admin --set-config-value=[MPM]AutoInstall=1 }
+          Step "initexmf AutoInstall" { initexmf --set-config-value=[MPM]AutoInstall=1 }
+          Step "miktex update-package-database" { miktex --admin packages update-package-database }
+          Step "latexmk --version" { latexmk --version }
       - name: install.ps1 (Windows PowerShell 5.1)
         if: runner.os == 'Windows'
         shell: powershell
