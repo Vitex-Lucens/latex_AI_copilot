@@ -99,15 +99,20 @@ jobs:
       - name: tex-annotator --version (macOS, Ubuntu)
         if: runner.os != 'Windows'
         run: |
-          "$HOME/.local/bin/tex-annotator" --version
-          "$HOME/.local/bin/tex-annotator" --check || true
+          "$HOME/.local/bin/tex-annotator" --version | grep -E "^tex-annotator [0-9]"
+          "$HOME/.local/bin/tex-annotator" --check || true   # reports Claude Code missing on CI
       - name: tex-annotator --version (Windows)
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-          & "$env:LOCALAPPDATA\tex-annotator\bin\tex-annotator.cmd" --version
+          $out = & "$env:LOCALAPPDATA\tex-annotator\bin\tex-annotator.cmd" --version
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0 -or "$out" -notmatch "tex-annotator \d") {
+            Write-Host "::error title=Windows launcher::tex-annotator --version failed: $out"
+            exit 1
+          }
           & "$env:LOCALAPPDATA\tex-annotator\bin\tex-annotator.cmd" --check
-          exit 0
+          exit 0   # --check reports Claude Code missing on CI
 
       # ---- the one-line installs, exactly as in the README (this commit, downloaded from GitHub)
       - name: one-line install (macOS, Ubuntu)
