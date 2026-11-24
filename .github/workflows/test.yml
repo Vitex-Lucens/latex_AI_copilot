@@ -50,8 +50,41 @@ jobs:
           TEX_ANNOTATOR_SKIP_PREREQS: "1"
         run: ./install.sh
 
-      # ---- Windows: the same TeX set-up install.ps1 makes (MiKTeX installing packages on demand, Perl for
-      # latexmk, Ghostscript in Program Files), with Chocolatey because CI machines have no winget
+      # ---- Windows: install.ps1 first (it doesn't need TeX), then the same TeX set-up install.ps1 makes for
+      # users (MiKTeX installing packages on demand, Perl for latexmk, Ghostscript in Program Files), with
+      # Chocolatey because CI machines have no winget
+      - name: install.ps1 (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          TEX_ANNOTATOR_SKIP_PREREQS: "1"
+        # an error in install.ps1 still fails the step; `exit 0` only drops the exit code of its final
+        # `tex-annotator --check`, which reports Claude Code missing here
+        run: |
+          try { .\install.ps1 } catch { Write-Host ("::error title=install.ps1::" + ("$_`n" + $_.ScriptStackTrace).Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")); exit 1 }
+          exit 0
+
+      - name: tex-annotator --version (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $out = & "$env:LOCALAPPDATA\tex-annotator\bin\tex-annotator.cmd" --version
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0 -or "$out" -notmatch "tex-annotator \d") {
+            Write-Host "::error title=Windows launcher::tex-annotator --version failed: $out"
+            exit 1
+          }
+          & "$env:LOCALAPPDATA\tex-annotator\bin\tex-annotator.cmd" --check
+          exit 0   # --check reports Claude Code missing on CI
+      - name: one-line install (Windows PowerShell 5.1)
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        shell: powershell
+        env:
+          TEX_ANNOTATOR_REF: ${{ github.sha }}
+          TEX_ANNOTATOR_SKIP_PREREQS: "1"
+        run: |
+          try { irm "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.ps1" | iex } catch { Write-Host ("::error title=one-line install.ps1::" + ("$_`n" + $_.ScriptStackTrace).Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")); exit 1 }
+          exit 0
       - name: TeX, Perl and Ghostscript (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -69,6 +102,13 @@ jobs:
               exit 1
             }
           }
+          # MiKTeX's Chocolatey package downloads from a random mirror and sometimes fails: try three times
+          foreach ($try in 1..3) {
+            choco install miktex ghostscript --no-progress -y | Out-Host
+            if ($LASTEXITCODE -eq 0) { break }
+            Write-Host "choco failed (attempt $try), retrying..."
+            Start-Sleep -Seconds 20
+          }
           Step "choco install miktex ghostscript" { choco install miktex ghostscript --no-progress -y }
           if (-not (Get-Command perl -ErrorAction SilentlyContinue)) {
             Step "choco install strawberryperl" { choco install strawberryperl --no-progress -y }
@@ -84,36 +124,12 @@ jobs:
           Step "initexmf AutoInstall" { initexmf --set-config-value=[MPM]AutoInstall=1 }
           Step "miktex update-package-database" { miktex --admin packages update-package-database }
           Step "latexmk --version" { latexmk --version }
-      - name: install.ps1 (Windows PowerShell 5.1)
-        if: runner.os == 'Windows'
-        shell: powershell
-        env:
-          TEX_ANNOTATOR_SKIP_PREREQS: "1"
-        # an error in install.ps1 still fails the step; `exit 0` only drops the exit code of its final
-        # `tex-annotator --check`, which reports Claude Code missing here
-        run: |
-          try { .\install.ps1 } catch { Write-Host ("::error title=install.ps1::" + ("$_`n" + $_.ScriptStackTrace).Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")); exit 1 }
-          exit 0
-
       # ---- the installed command works
       - name: tex-annotator --version (macOS, Ubuntu)
         if: runner.os != 'Windows'
         run: |
           "$HOME/.local/bin/tex-annotator" --version | grep -E "^tex-annotator [0-9]"
           "$HOME/.local/bin/tex-annotator" --check || true   # reports Claude Code missing on CI
-      - name: tex-annotator --version (Windows)
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          $out = & "$env:LOCALAPPDATA\tex-annotator\bin\tex-annotator.cmd" --version
-          Write-Host $out
-          if ($LASTEXITCODE -ne 0 -or "$out" -notmatch "tex-annotator \d") {
-            Write-Host "::error title=Windows launcher::tex-annotator --version failed: $out"
-            exit 1
-          }
-          & "$env:LOCALAPPDATA\tex-annotator\bin\tex-annotator.cmd" --check
-          exit 0   # --check reports Claude Code missing on CI
-
       # ---- the one-line installs, exactly as in the README (this commit, downloaded from GitHub)
       - name: one-line install (macOS, Ubuntu)
         if: runner.os != 'Windows' && github.event_name == 'push'
@@ -121,15 +137,5 @@ jobs:
           TEX_ANNOTATOR_REF: ${{ github.sha }}
           TEX_ANNOTATOR_SKIP_PREREQS: "1"
         run: curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.sh" | bash
-      - name: one-line install (Windows PowerShell 5.1)
-        if: runner.os == 'Windows' && github.event_name == 'push'
-        shell: powershell
-        env:
-          TEX_ANNOTATOR_REF: ${{ github.sha }}
-          TEX_ANNOTATOR_SKIP_PREREQS: "1"
-        run: |
-          try { irm "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.ps1" | iex } catch { Write-Host ("::error title=one-line install.ps1::" + ("$_`n" + $_.ScriptStackTrace).Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")); exit 1 }
-          exit 0
-
       - name: Smoke test
         run: python tests/smoke_test.py
