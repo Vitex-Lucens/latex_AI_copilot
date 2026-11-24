@@ -89,7 +89,11 @@ jobs:
         shell: powershell
         env:
           TEX_ANNOTATOR_SKIP_PREREQS: "1"
-        run: .\install.ps1
+        # an error in install.ps1 still fails the step; `exit 0` only drops the exit code of its final
+        # `tex-annotator --check`, which reports Claude Code missing here
+        run: |
+          try { .\install.ps1 } catch { Write-Host ("::error title=install.ps1::" + ("$_`n" + $_.ScriptStackTrace).Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")); exit 1 }
+          exit 0
 
       # ---- the installed command works
       - name: tex-annotator --version (macOS, Ubuntu)
@@ -118,7 +122,9 @@ jobs:
         env:
           TEX_ANNOTATOR_REF: ${{ github.sha }}
           TEX_ANNOTATOR_SKIP_PREREQS: "1"
-        run: irm "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.ps1" | iex
+        run: |
+          try { irm "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.ps1" | iex } catch { Write-Host ("::error title=one-line install.ps1::" + ("$_`n" + $_.ScriptStackTrace).Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")); exit 1 }
+          exit 0
 
       - name: Smoke test
         run: python tests/smoke_test.py
