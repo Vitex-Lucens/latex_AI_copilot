@@ -23,6 +23,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import platform
 import re
 import shutil
 import signal
@@ -264,7 +265,8 @@ def compile_tex() -> dict:
         "-halt-on-error", "-file-line-error", S.tex.name,
     ]
     with S.compile_lock:
-        proc = subprocess.run(cmd, cwd=S.tex.parent, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        proc = subprocess.run(cmd, cwd=S.tex.parent, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", stdin=subprocess.DEVNULL)
     ok = proc.returncode == 0
     errors = "" if ok else extract_errors(proc.stdout + "\n" + proc.stderr)
     S.last_compile = {"ok": ok, "errors": errors, "time": time.time()}
@@ -291,7 +293,7 @@ def synctex_lookup(page: int, x: float, y: float) -> tuple[str, int] | None:
     try:
         out = subprocess.run(
             ["synctex", "edit", "-o", f"{page}:{x:.1f}:{y:.1f}:{S.pdf}", "-d", str(S.tex.parent)],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
         ).stdout
     except Exception:
         return None
@@ -311,7 +313,7 @@ def synctex_view(relpath: str, line: int) -> dict | None:
     try:
         out = subprocess.run(
             ["synctex", "view", "-i", f"{line}:0:{src}", "-o", str(S.pdf), "-d", str(S.tex.parent)],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
         ).stdout
     except Exception:
         return None
@@ -531,14 +533,57 @@ EFFORTS = {"low", "medium", "high"}
 APP_TOOLS = "Read,Edit,Write,Glob,Grep"
 
 
+def claude_command() -> list[str] | None:
+    """How to start Claude Code on this computer, or None if it isn't installed."""
+    exe = shutil.which("claude")
+    if not exe:   # the official installer's location, in case PATH hasn't been updated yet
+        home_bin = Path.home() / ".local" / "bin" / ("claude.exe" if os.name == "nt" else "claude")
+        exe = str(home_bin) if home_bin.exists() else None
+    if not exe:
+        return None
+    if os.name == "nt" and exe.lower().endswith((".cmd", ".bat")):
+        # npm's Windows shim runs `node …\cli.js`. Run that directly: arguments given to a .cmd pass through
+        # cmd.exe, which mangles them.
+        try:
+            m = re.search(r'%~?dp0%?\\([^"%]+?\.js)"', Path(exe).read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            m = None
+        if m:
+            script = Path(exe).parent / m.group(1)
+            node = Path(exe).parent / "node.exe"
+            node = str(node) if node.exists() else shutil.which("node")
+            if script.exists() and node:
+                return [node, str(script)]
+    return [exe]
+
+
+def kill_tree(proc: subprocess.Popen):
+    """Stop a process and everything it started."""
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=15)
+    except (ProcessLookupError, OSError, subprocess.SubprocessError):
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+
+
 def run_claude(prompt: str, extra_dirs: list[str], resume: str | None = None,
                model: str | None = None, effort: str | None = None,
                system: str | None = None) -> tuple[bool, str, str | None]:
-    claude = shutil.which("claude")
+    claude = claude_command()
     if not claude:
-        return False, "The `claude` CLI was not found on PATH.", None
+        return False, "Claude Code isn't installed (the `claude` command wasn't found). Run `tex-annotator --check`.", None
+    # The prompt goes in on stdin and the system prompt in a file, so neither passes through the command line
+    # (length limits, and quoting on Windows).
+    fd, sys_path = tempfile.mkstemp(prefix="texann-system-", suffix=".md")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(system or system_prompt())
     cmd = [
-        claude, "-p", prompt,
+        *claude, "-p",
         "--output-format", "stream-json", "--verbose", "--include-partial-messages",
         "--permission-mode", "acceptEdits",
         # Load only what this app needs. Without these, every request also carries the
@@ -546,7 +591,7 @@ def run_claude(prompt: str, extra_dirs: list[str], resume: str | None = None,
         "--tools", APP_TOOLS, "--allowedTools", *APP_TOOLS.split(","),
         "--strict-mcp-config", "--disable-slash-commands",
         "--restricted",   # no command-running tools, ignore user/project settings, file tools stay in the project
-        "--append-system-prompt", system or system_prompt(),
+        "--append-system-prompt-file", sys_path,
     ]
     for d in extra_dirs:
         cmd += ["--add-dir", d]
@@ -563,11 +608,23 @@ def run_claude(prompt: str, extra_dirs: list[str], resume: str | None = None,
     # nothing it does to its own group or the TTY can affect the server.
     detach = ({"start_new_session": True} if os.name == "posix"
               else {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)})
-    proc = subprocess.Popen(cmd, cwd=S.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            stdin=subprocess.DEVNULL, text=True, bufsize=1, encoding="utf-8", **detach)
+    try:
+        proc = subprocess.Popen(cmd, cwd=S.root, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, bufsize=1, encoding="utf-8", errors="replace", **detach)
+    except OSError as e:
+        Path(sys_path).unlink(missing_ok=True)
+        return False, f"Couldn't start Claude Code: {e}", None
     S.proc = proc
     stderr_buf: list[str] = []
     threading.Thread(target=lambda: stderr_buf.append(proc.stderr.read()), daemon=True).start()
+
+    def feed():
+        try:
+            proc.stdin.write(prompt)
+            proc.stdin.close()
+        except OSError:
+            pass
+    threading.Thread(target=feed, daemon=True).start()
 
     result_text, ok, session_id, used_model = "", False, None, model or "default"
     try:
@@ -617,6 +674,7 @@ def run_claude(prompt: str, extra_dirs: list[str], resume: str | None = None,
     finally:
         proc.wait()
         S.proc = None
+        Path(sys_path).unlink(missing_ok=True)
         with S.lock:
             S.partial = ""
     slog(f"claude exited rc={proc.returncode}")
@@ -1094,6 +1152,7 @@ class Handler(BaseHTTPRequestHandler):
                 "importSource": src.get("name") if src else None,
                 "imported": (S.import_dir / "extraction.md").exists(),
                 "gs": bool(pdf_import.gs_path()),
+                "cacheDir": str(CACHE),
                 "pdfExists": S.pdf.exists(),
                 "pdfMtime": S.pdf.stat().st_mtime if S.pdf.exists() else 0,
                 "compile": S.last_compile,
@@ -1320,13 +1379,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True})
             S.cancelled = True
             if proc and proc.poll() is None:
-                try:
-                    if os.name == "posix":
-                        os.killpg(proc.pid, signal.SIGTERM)
-                    else:
-                        proc.terminate()
-                except (ProcessLookupError, OSError):
-                    pass
+                kill_tree(proc)
             slog("cancel requested")
             return self.send_json({"ok": True})
 
@@ -1345,7 +1398,16 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
 
+def in_wsl() -> bool:
+    return sys.platform.startswith("linux") and "microsoft" in platform.uname().release.lower()
+
+
 def open_browser(url: str):
+    if in_wsl():   # a Linux program inside Windows: open the Windows browser
+        for cmd in (["wslview", url], ["explorer.exe", url]):
+            if shutil.which(cmd[0]):
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
     try:
         if webbrowser.open(url):
             return
@@ -1361,48 +1423,84 @@ def open_browser(url: str):
     print(f"(Couldn't open a browser automatically; open {url} yourself.)")
 
 
+INSTALLER = ("install.ps1 (Windows)" if os.name == "nt" else "install.sh")
+HINTS = {  # how to get each missing piece, per system
+    "tex": {"win": "install MiKTeX (winget install MiKTeX.MiKTeX) and Strawberry Perl (winget install StrawberryPerl.StrawberryPerl)",
+            "mac": "install MacTeX: brew install --cask mactex-no-gui (or download it from tug.org/mactex)",
+            "linux": "sudo apt install texlive-latex-extra texlive-fonts-recommended latexmk"},
+    "perl": {"win": "latexmk needs Perl: winget install StrawberryPerl.StrawberryPerl, then open a new terminal"},
+    "gs": {"win": "download it from https://ghostscript.com/releases/gsdnld.html (or run install.ps1 again)",
+           "mac": "brew install ghostscript (MacTeX usually includes it)",
+           "linux": "sudo apt install ghostscript"},
+    "claude": {"win": "irm https://claude.ai/install.ps1 | iex   (in PowerShell)",
+               "mac": "curl -fsSL https://claude.ai/install.sh | bash",
+               "linux": "curl -fsSL https://claude.ai/install.sh | bash"},
+}
+
+
+def hint(what: str) -> str:
+    key = "win" if os.name == "nt" else "mac" if sys.platform == "darwin" else "linux"
+    return HINTS[what].get(key, "")
+
+
 def check_requirements() -> bool:
     """Print what is installed and what is missing. Returns True if everything needed is there."""
     ok = True
 
-    def line(good: bool, name: str, detail: str):
-        print(f"  {'OK ' if good else 'MISSING'}  {name:<10} {detail}")
+    def line(good, name: str, detail: str):
+        mark = "OK " if good else "?  " if good is None else "MISSING"
+        print(f"  {mark:<7}  {name:<10} {detail}")
 
-    def version(cmd: list[str]) -> str:
+    def run(cmd: list[str], timeout=30) -> tuple[int, str]:
         try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-            return (out.stdout or out.stderr).strip().splitlines()[0][:70]
-        except Exception:  # noqa: BLE001
-            return ""
+            out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                 timeout=timeout, stdin=subprocess.DEVNULL)
+            return out.returncode, (out.stdout or "") + (out.stderr or "")
+        except Exception as e:  # noqa: BLE001
+            return -1, str(e)
 
-    print(f"tex-annotator {__version__}\n")
+    def first_line(text: str) -> str:
+        return (text.strip().splitlines() or [""])[0][:70]
+
+    print(f"tex-annotator {__version__} on {platform.system()} {platform.release()}" + (" (WSL)" if in_wsl() else "") + "\n")
     py_ok = sys.version_info >= (3, 10)
     line(py_ok, "python", f"{sys.version.split()[0]}" + ("" if py_ok else "  (3.10 or newer is required)"))
     ok &= py_ok
-    for tool, hint in (("latexmk", "Install TeX Live. Ubuntu/Debian: sudo apt install texlive-latex-extra latexmk · macOS: install MacTeX"),
-                       ("synctex", "Comes with TeX Live / MacTeX (texlive-binaries on Ubuntu)")):
-        path = shutil.which(tool)
-        line(bool(path), tool, version([tool, "--version"]) if path else hint)
-        ok &= bool(path)
-    gs = pdf_import.gs_path()
-    print(f"  {'OK ' if gs else 'missing'}  {'gs':<10} " + (version([gs, "--version"]) + "  (for importing PDFs)" if gs else
-          "only needed to import PDFs. Ubuntu/Debian: sudo apt install ghostscript · macOS: brew install ghostscript"))
-    claude = shutil.which("claude")
-    if not claude:
-        line(False, "claude", "Install Claude Code (https://claude.com/claude-code), then run `claude` once to sign in")
-        return False
-    line(True, "claude", version([claude, "--version"]))
-    try:
-        st = json.loads(subprocess.run([claude, "auth", "status"], capture_output=True, text=True, timeout=30).stdout)
-        signed_in = bool(st.get("loggedIn"))
-    except Exception:  # noqa: BLE001
-        signed_in = None
-    if signed_in is None:
-        print("  ?        sign-in    couldn't check; run `claude` once in a terminal to make sure you're signed in")
+
+    latexmk = shutil.which("latexmk")
+    if not latexmk:
+        line(False, "latexmk", "a TeX distribution is needed: " + hint("tex"))
+        ok = False
     else:
-        line(signed_in, "sign-in", "signed in to Claude" if signed_in else "run `claude` once in a terminal and sign in")
-        ok &= signed_in
-    print("\nAll set." if ok else "\nInstall the missing pieces above, then run `tex-annotator --check` again.")
+        rc, out = run([latexmk, "--version"])
+        works = "latexmk" in out.lower() and rc == 0
+        line(works, "latexmk", first_line(out) if works else (hint("perl") or first_line(out)))
+        ok &= works
+    synctex = shutil.which("synctex")
+    line(bool(synctex), "synctex", first_line(run([synctex, "--version"])[1]) if synctex else "comes with TeX: " + hint("tex"))
+    ok &= bool(synctex)
+
+    gs = pdf_import.gs_path()
+    print(f"  {'OK ' if gs else 'missing':<7}  {'gs':<10} " +
+          (first_line(run([gs, "--version"])[1]) + "  (for importing PDFs)" if gs else
+           "only needed to import PDFs: " + hint("gs")))
+
+    claude = claude_command()
+    if not claude:
+        line(False, "claude", "Claude Code is needed: " + hint("claude") + ", then run `claude` once to sign in")
+        print(f"\nInstall the missing pieces above (or run {INSTALLER} again), then run `tex-annotator --check`.")
+        return False
+    line(True, "claude", first_line(run([*claude, "--version"])[1]))
+    rc, out = run([*claude, "auth", "status"])
+    try:
+        signed_in = bool(json.loads(out[out.index("{"):]).get("loggedIn"))
+    except ValueError:
+        signed_in = True if rc == 0 else False if rc == 1 else None
+    line(signed_in, "sign-in", "signed in to Claude" if signed_in else
+         "run `claude` once in a terminal and sign in" if signed_in is False else
+         "couldn't check; run `claude` once in a terminal to make sure you're signed in")
+    ok &= signed_in is not False
+    print("\nAll set." if ok else f"\nInstall the missing pieces above (or run {INSTALLER} again), then run `tex-annotator --check`.")
     return ok
 
 
@@ -1426,8 +1524,8 @@ def project_for_pdf(pdf: Path) -> Path:
 def main():
     global S
     # Print progress immediately even when stdout isn't a terminal.
-    sys.stdout.reconfigure(line_buffering=True)
-    sys.stderr.reconfigure(line_buffering=True)
+    sys.stdout.reconfigure(line_buffering=True, errors="replace")
+    sys.stderr.reconfigure(line_buffering=True, errors="replace")
     ap = argparse.ArgumentParser(prog="tex-annotator", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("project", nargs="?", default=".", help="Project folder or main .tex file (default: current folder)")
     ap.add_argument("--port", type=int, default=8765, help="Port for the local web page (default 8765; the next free one is used if taken)")

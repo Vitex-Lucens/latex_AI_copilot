@@ -7,32 +7,40 @@ No LaTeX source? Import a PDF, and Claude rebuilds it as an editable LaTeX docum
 
 ![tex-annotator](docs/screenshot.png)
 
-## What you need
-
-| | How to get it |
-|---|---|
-| **macOS or Linux** | On Windows, use it inside WSL. |
-| **Python 3.10+** | macOS: `brew install python` · Ubuntu/Debian: `sudo apt install python3` (usually already installed) |
-| **TeX Live** (with `latexmk` and `synctex`) | macOS: install [MacTeX](https://tug.org/mactex/) · Ubuntu/Debian: `sudo apt install texlive-latex-extra latexmk` |
-| **Claude Code**, signed in | Install it from [claude.com/claude-code](https://claude.com/claude-code), then run `claude` once in a terminal and sign in. tex-annotator uses that login, so it doesn't need an API key. |
-| **Ghostscript** (only to import PDFs) | macOS: included with MacTeX, or `brew install ghostscript` · Ubuntu/Debian: `sudo apt install ghostscript` (often already installed) |
-
 ## Install
 
-1. Unzip `tex-annotator-<version>.zip`.
-2. In a terminal, go into the unzipped folder and run:
+**macOS, Ubuntu (or another Linux), or WSL:** paste this into a terminal:
 
-   ```bash
-   ./install.sh
-   ```
+```bash
+curl -fsSL https://raw.githubusercontent.com/Vitex-Lucens/latex_AI_copilot/main/install.sh | bash
+```
 
-   This puts the app in `~/.local/share/tex-annotator` and adds a `tex-annotator` command. You don't need admin rights.
-   It finishes by checking the requirements above and telling you if anything is missing.
-   If it offers to add `~/.local/bin` to your PATH, say yes, then open a new terminal.
+**Windows 10 or 11:** paste this into PowerShell:
 
-3. To check your setup at any time, run `tex-annotator --check`.
+```powershell
+irm https://raw.githubusercontent.com/Vitex-Lucens/latex_AI_copilot/main/install.ps1 | iex
+```
 
-To **update**, unzip the new version and run `./install.sh` again. To **remove** the app, run `./install.sh --uninstall`.
+The installer checks what tex-annotator needs and offers to install anything that's missing, asking before each step:
+
+| | macOS | Ubuntu, Debian, WSL | Windows |
+|---|---|---|---|
+| **Python 3.10+** | Homebrew | apt | winget |
+| **TeX**, to compile | MacTeX (a 5 GB download) | TeX Live from apt (about 1 GB) | MiKTeX and Strawberry Perl, from winget |
+| **Ghostscript**, to import PDFs | Homebrew (MacTeX usually includes it) | apt | the official installer from ghostscript.com |
+| **Claude Code** | Anthropic's installer | Anthropic's installer | Anthropic's installer |
+
+Then it installs the app and a `tex-annotator` command, and finishes with `tex-annotator --check`, which lists anything still missing.
+The app itself needs no admin rights: it lives in `~/.local/share/tex-annotator` (Windows: `%LOCALAPPDATA%\tex-annotator`).
+Installing TeX and the other tools asks for your password (macOS, Linux) or for permission (Windows).
+
+Afterwards, **open a new terminal**. If Claude Code is new on this computer, run `claude` once and sign in: tex-annotator uses that login, so it doesn't need an API key.
+
+- **From a copy** of this repository (a git clone or the zip): run `./install.sh` (macOS, Linux), or double-click `install.cmd` (Windows).
+- **To update:** run the installer again.
+- **To remove the app:** `~/.local/share/tex-annotator/install.sh --uninstall` (macOS, Linux) or `%LOCALAPPDATA%\tex-annotator\app\install.cmd -Uninstall` (Windows). Python, TeX, Ghostscript and Claude Code stay installed.
+- **Other Linux distributions:** install Python 3.10+, TeX with `latexmk`, and Ghostscript with your package manager; the installer then installs the app.
+- **To check your setup** at any time: `tex-annotator --check`.
 
 ## Use
 
@@ -96,6 +104,7 @@ tex-annotator [PROJECT | MAIN.tex | FILE.pdf] [--engine pdf|xe|lua] [--model MOD
 ## For developers
 
 You can run it straight from this folder with `python3 -m tex_annotator [project]`; it only uses the Python standard library.
+`python tests/smoke_test.py` checks everything that depends on the system (compiling, SyncTeX, the PDF import, the server); GitHub Actions runs it on Windows, macOS and Ubuntu for every push (`.github/workflows/test.yml`).
 The PDF analysis can be run on its own, which is handy when working on it: `python3 -m tex_annotator.pdf_import original.pdf text.json out-folder`, where `text.json` is what `static/pdf-extract.js` returns for the PDF.
 To try the multi-part conversion on a short document, start the app with `TEX_ANNOTATOR_PART_PAGES=2` (or `TEX_ANNOTATOR_PART_WORDS`) set.
 It also works as a normal Python package: `pipx install .`

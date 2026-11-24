@@ -23,6 +23,7 @@ For testing:  python3 -m tex_annotator.pdf_import original.pdf text.json out-fol
 
 import json
 import math
+import os
 import re
 import shutil
 import struct
@@ -53,19 +54,27 @@ class PdfImportError(Exception):
 # --------------------------------------------------------------------------- #
 
 def gs_path() -> str | None:
-    return shutil.which("gs") or shutil.which("gswin64c") or shutil.which("gswin32c")
+    """Ghostscript: `gs` on macOS/Linux, `gswin64c` on Windows (whose installer doesn't add it to PATH)."""
+    found = shutil.which("gs") or shutil.which("gswin64c") or shutil.which("gswin32c")
+    if found or sys.platform != "win32":
+        return found
+    for base in {os.environ.get("ProgramFiles", r"C:\Program Files"), os.environ.get("ProgramFiles(x86)", "")} - {""}:
+        hits = sorted(Path(base).glob("gs/gs*/bin/gswin64c.exe")) + sorted(Path(base).glob("gs/gs*/bin/gswin32c.exe"))
+        if hits:
+            return str(hits[-1])                            # the newest version
+    return shutil.which("rungs")                            # TeX Live's own Ghostscript on Windows
 
 
-GS_MISSING = ("Importing a PDF needs Ghostscript (the `gs` command). Ubuntu/Debian: sudo apt install ghostscript · "
-              "macOS: brew install ghostscript (MacTeX already includes it).")
+GS_MISSING = ("Importing a PDF needs Ghostscript. Windows: https://ghostscript.com/releases/gsdnld.html (or run install.ps1 again) · "
+              "Ubuntu/Debian: sudo apt install ghostscript · macOS: brew install ghostscript (MacTeX already includes it).")
 
 
 def run_gs(args: list[str], timeout: int = 1200):
     exe = gs_path()
     if not exe:
         raise PdfImportError(GS_MISSING)
-    p = subprocess.run([exe, "-q", "-dSAFER", "-dBATCH", "-dNOPAUSE", "-dUseCropBox", *args],
-                       capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    p = subprocess.run([exe, "-q", "-dSAFER", "-dBATCH", "-dNOPAUSE", "-dUseCropBox", *args], capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", timeout=timeout, stdin=subprocess.DEVNULL)
     if p.returncode != 0:
         raise PdfImportError("Ghostscript couldn't process the PDF:\n" + (p.stderr or p.stdout).strip()[-1500:])
 
@@ -239,19 +248,24 @@ OTHER_PACKAGES = ["geometry", "tikz", "pgfplots", "tcolorbox", "fancyhdr", "titl
                   "siunitx", "mathtools", "amssymb", "ragged2e", "lastpage", "csquotes", "babel"]
 
 
-def installed_packages() -> set[str]:
+def installed_packages() -> set[str] | None:
+    """LaTeX packages installed here (from the list above). None for MiKTeX, which installs packages on first use."""
     kpse = shutil.which("kpsewhich")
     if not kpse:
         return set()
     try:
+        ver = subprocess.run([kpse, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             timeout=30).stdout
+        if "miktex" in ver.lower():
+            return None
         out = subprocess.run([kpse, *[p + ".sty" for p in FONT_PACKAGES + OTHER_PACKAGES]], capture_output=True,
-                             text=True, timeout=60).stdout
+                             text=True, encoding="utf-8", errors="replace", timeout=60).stdout
     except Exception:  # noqa: BLE001
         return set()
     return {Path(line.strip()).stem for line in out.splitlines() if line.strip()}
 
 
-def font_suggestion(name: str, have: set[str]) -> str:
+def font_suggestion(name: str, have: set[str] | None) -> str:
     squash = re.sub(r"[\s_-]", "", name)
     for pat, label, pkgs in FONT_MATCHES:
         if re.search(pat, squash, re.I):
@@ -1910,7 +1924,11 @@ def write_extraction(pages: list[Page], running, body: float, have: set, text: d
         if len(outline) > 150:
             out.append(f"(+ {len(outline) - 150} more)")
 
-    if have:
+    if have is None:
+        out += ["", "## LaTeX packages",
+                "This computer uses MiKTeX, which installs any missing package the first time a document uses it (this "
+                "needs an internet connection), so the usual packages are all available. Prefer widely used ones."]
+    elif have:
         out += ["", "## LaTeX packages installed on this computer",
                 "Fonts: " + ", ".join(p for p in FONT_PACKAGES if p in have),
                 "Other: " + ", ".join(p for p in OTHER_PACKAGES if p in have)]

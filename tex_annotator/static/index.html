@@ -460,9 +460,14 @@ async function api(path, opts = {}) {
   if (!r.ok) { const err = new Error(j.message || j.error || r.statusText); err.status = r.status; err.body = j; throw err; }
   return j;
 }
+// Where the app keeps its log and deleted files (shown in messages), using the system's own path style.
+function cachePath(name) {
+  const dir = status.cacheDir || "~/.cache/tex-annotator";
+  return dir + (dir.includes("\\") ? "\\" : "/") + name;
+}
 function serverDown(down) {
   const b = $("#banner");
-  b.textContent = down ? "Lost connection to the tex-annotator server. Check the terminal it was started from (and ~/.cache/tex-annotator/server.log), then restart it and reload this page." : "";
+  b.textContent = down ? `Lost connection to the tex-annotator server. Check the terminal it was started from (and ${cachePath("server.log")}), then restart it and reload this page.` : "";
   b.classList.toggle("show", down);
 }
 
@@ -826,7 +831,7 @@ async function renamePath(path, isDir) {
 }
 
 async function deletePath(path, isDir) {
-  if (!confirm(`Delete ${isDir ? "the folder " : ""}${path}?\n\nIt will be moved to ~/.cache/tex-annotator/trash, so you can get it back.`)) return;
+  if (!confirm(`Delete ${isDir ? "the folder " : ""}${path}?\n\nIt will be moved to ${cachePath("trash")}, so you can get it back.`)) return;
   try {
     await api("/api/files/delete", { body: { path } });
     for (const t of [...tabs]) if (t === path || t.startsWith(path + "/")) closeTab(t, true);

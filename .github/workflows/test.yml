@@ -1,0 +1,105 @@
+# Installs tex-annotator on Windows, macOS and Ubuntu the way users do, then runs tests/smoke_test.py
+# (compiling, SyncTeX, PDF import, the server). Claude Code isn't installed here.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4   # runs the browser's pdf.js text extraction in the test
+        with:
+          node-version: "20"
+
+      # ---- Ubuntu: install.sh installs TeX and Ghostscript itself (apt), as for users
+      - name: install.sh (Ubuntu, with prerequisites)
+        if: runner.os == 'Linux'
+        env:
+          TEX_ANNOTATOR_YES: "1"
+          TEX_ANNOTATOR_NO_CLAUDE: "1"
+        run: ./install.sh
+
+      # ---- macOS: BasicTeX instead of MacTeX (5 GB is too slow for CI), then install.sh for the app
+      - name: TeX and Ghostscript (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install --cask basictex
+          brew install ghostscript
+          echo "/Library/TeX/texbin" >> "$GITHUB_PATH"
+          export PATH="/Library/TeX/texbin:$PATH"
+          sudo tlmgr update --self
+          sudo tlmgr install latexmk synctex pgf geometry xcolor
+      - name: install.sh (macOS)
+        if: runner.os == 'macOS'
+        env:
+          TEX_ANNOTATOR_SKIP_PREREQS: "1"
+        run: ./install.sh
+
+      # ---- Windows: the same TeX set-up install.ps1 makes (MiKTeX installing packages on demand, Perl for
+      # latexmk, Ghostscript in Program Files), with Chocolatey because CI machines have no winget
+      - name: TeX, Perl and Ghostscript (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install miktex ghostscript --no-progress -y
+          if (-not (Get-Command perl -ErrorAction SilentlyContinue)) { choco install strawberryperl --no-progress -y }
+          $bin = "C:\Program Files\MiKTeX\miktex\bin\x64"
+          $env:Path = "$bin;$env:Path"
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+          initexmf --admin --set-config-value=[MPM]AutoInstall=1
+          initexmf --set-config-value=[MPM]AutoInstall=1
+          miktex --admin packages update-package-database
+          latexmk --version
+      - name: install.ps1 (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          TEX_ANNOTATOR_SKIP_PREREQS: "1"
+        run: .\install.ps1
+
+      # ---- the installed command works
+      - name: tex-annotator --version (macOS, Ubuntu)
+        if: runner.os != 'Windows'
+        run: |
+          "$HOME/.local/bin/tex-annotator" --version
+          "$HOME/.local/bin/tex-annotator" --check || true
+      - name: tex-annotator --version (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          & "$env:LOCALAPPDATA\tex-annotator\bin\tex-annotator.cmd" --version
+          & "$env:LOCALAPPDATA\tex-annotator\bin\tex-annotator.cmd" --check
+          exit 0
+
+      # ---- the one-line installs, exactly as in the README (this commit, downloaded from GitHub)
+      - name: one-line install (macOS, Ubuntu)
+        if: runner.os != 'Windows' && github.event_name == 'push'
+        env:
+          TEX_ANNOTATOR_REF: ${{ github.sha }}
+          TEX_ANNOTATOR_SKIP_PREREQS: "1"
+        run: curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.sh" | bash
+      - name: one-line install (Windows PowerShell 5.1)
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        shell: powershell
+        env:
+          TEX_ANNOTATOR_REF: ${{ github.sha }}
+          TEX_ANNOTATOR_SKIP_PREREQS: "1"
+        run: irm "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.ps1" | iex
+
+      - name: Smoke test
+        run: python tests/smoke_test.py

@@ -7,7 +7,7 @@ NAME="tex-annotator-$VERSION"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/$NAME" dist
-cp -R tex_annotator docs install.sh README.md THIRD_PARTY_NOTICES.md pyproject.toml "$STAGE/$NAME/"
+cp -R tex_annotator docs install.sh install.ps1 install.cmd README.md LICENSE THIRD_PARTY_NOTICES.md pyproject.toml "$STAGE/$NAME/"
 find "$STAGE" -name '__pycache__' -type d -prune -exec rm -rf {} +
 chmod +x "$STAGE/$NAME/install.sh"
 rm -f "dist/$NAME.zip"
