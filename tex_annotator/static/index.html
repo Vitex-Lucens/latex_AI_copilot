@@ -17,6 +17,7 @@
 <link rel="stylesheet" href="/vendor/codemirror.min.css">
 <link rel="stylesheet" href="/vendor/dialog.min.css">
 <script src="/vendor/pdf.min.js"></script>
+<script src="/pdf-extract.js"></script>
 <script src="/vendor/codemirror.min.js"></script>
 <script src="/vendor/stex.min.js"></script>
 <script src="/vendor/dialog.min.js"></script>
@@ -46,6 +47,7 @@
   }
   :root { --tree-w: 210px; --editor-w: 520px; --aside-w: 360px; }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { margin: 0; height: 100%; font: 14px/1.45 system-ui, sans-serif; color: var(--ink); background: var(--bg); overflow: hidden; }
   #app { display: grid; grid-template-rows: auto auto 1fr; height: 100vh; }
   #app > header { grid-row: 1; } #banner { grid-row: 2; } #app > main { grid-row: 3; }
@@ -78,6 +80,7 @@
   .seg > :hover, .seg > .active { position: relative; z-index: 1; }
   #zoomLabel { height: 30px; min-width: 52px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line); margin-left: -1px;
     font: 500 12.5px system-ui, sans-serif; font-variant-numeric: tabular-nums; color: var(--muted); background: var(--panel-2); }
+  @media (max-width: 1640px) { #toPdf .lbl { display: none; } #toPdf { width: 30px; padding: 0; justify-content: center; } }
   @media (max-width: 1280px) { header .lbl { display: none; } header button:has(.lbl) { width: 30px; padding: 0; justify-content: center; } header button.primary:has(.lbl) { width: auto; padding: 0 11px; } header button.primary .lbl { display: inline; } }
 
   #banner { display: none; background: var(--err-bg); color: var(--err); border-bottom: 1px solid var(--err-line); padding: 6px 12px; font-weight: 600; }
@@ -229,6 +232,23 @@
   #composeRow2 select { height: 28px; font-size: 12.5px; padding: 0 6px; }
   #ctxMeter { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
   #ctxMeter.warn { color: #d97706; font-weight: 600; }
+
+  /* ---- start page and PDF import ---- */
+  .welcome { max-width: 470px; margin: 48px auto 0; padding: 22px 24px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+             color: var(--ink); text-align: left; box-shadow: 0 1px 3px var(--page-shadow); }
+  .welcome h2 { margin: 0 0 8px; font: 600 17px system-ui, sans-serif; }
+  .welcome p { margin: 6px 0; color: var(--muted); font-size: 13.5px; }
+  .welcome .actions { display: flex; gap: 8px; margin: 16px 0 4px; flex-wrap: wrap; }
+  .welcome .actions button { height: 34px; }
+  .welcome label.check { display: flex; gap: 7px; align-items: flex-start; font-size: 13px; color: var(--ink); margin-top: 12px; cursor: pointer; }
+  .welcome label.check input { margin-top: 3px; }
+  .welcome .fine { font-size: 12px; color: var(--muted); margin-top: 12px; }
+  .welcome .warn { color: var(--err); font-size: 13px; margin-top: 10px; }
+  .welcome.drop { outline: 2px dashed var(--accent); outline-offset: 4px; }
+  #viewTag { display: none; position: sticky; top: -8px; z-index: 4; margin: -6px auto 10px; width: fit-content; font: 600 12px system-ui, sans-serif;
+             color: var(--accent-ink); background: var(--accent); padding: 3px 12px; border-radius: 999px; box-shadow: 0 1px 3px var(--page-shadow); }
+  body[data-view="original"] #viewTag { display: block; }
+  body[data-view="original"] .overlay, body[data-view="original"] .pin { visibility: hidden; }
 </style>
 </head>
 <body data-tool="select">
@@ -239,6 +259,7 @@
   <span class="sep"></span>
   <button id="saveCompile" class="primary" title="Save all and recompile (Ctrl+S)"><i data-icon="play"></i><span class="lbl">Recompile</span></button>
   <button id="toPdf" title="Show the cursor's line in the PDF (Ctrl+Enter in the editor)"><i data-icon="locate"></i><span class="lbl">Source → PDF</span></button>
+  <button id="viewOriginal" title="Show the PDF you imported, to compare with the LaTeX version (O)" hidden><i data-icon="compare"></i><span class="lbl">Original</span></button>
   <span class="sep"></span>
   <div class="seg" role="group" aria-label="PDF tool">
     <button id="toolSelect" class="active" title="Select: click the PDF to jump to the source (S)"><i data-icon="pointer"></i><span class="lbl">Select</span></button>
@@ -291,7 +312,8 @@
     <div id="editorFoot"><span id="dirty"></span><span class="spacer"></span><span class="keys">Ctrl+S compile · Ctrl+F find · Ctrl+Enter → PDF</span></div>
   </div>
   <div class="splitter" id="splitEditor" title="Drag to resize · double-click to reset"></div>
-  <div id="viewer"><div id="pages"></div><div id="empty" hidden>No PDF yet. Fix the compile errors shown in the chat, then Recompile.</div></div>
+  <div id="viewer"><div id="viewTag">The PDF you imported · press O or Original to go back</div><div id="pages"></div><div id="empty" hidden></div></div>
+  <input type="file" id="importInput" accept="application/pdf,.pdf" hidden>
   <div class="splitter" id="splitAside" title="Drag to resize · double-click to reset"></div>
   <aside>
     <div id="chatHead">
@@ -386,6 +408,8 @@ const ICONS = {
   chevDown: '<path d="M6.5 9.5l5.5 5.5 5.5-5.5"/>',
   star: '<path d="M12 4l2.4 5 5.3.7-3.9 3.7 1 5.3L12 16.2 7.2 18.7l1-5.3-3.9-3.7 5.3-.7z"/>',
   rename: '<path d="M4.5 19.5l1-4.5L16 4.5l3.5 3.5L9 18.5z"/>',
+  compare: '<rect x="3.5" y="6.5" width="10" height="13.5" rx="1.2"/><path d="M10.5 6.5V4h10v13.5h-7"/>',
+  fileImport: '<path d="M13.5 3.5H6.5v17h11V7.5z"/><path d="M13.5 3.5v4h4"/><path d="M12 10.5v6.5M9.2 14.3l2.8 2.8 2.8-2.8"/>',
 };
 const icon = name => `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 document.querySelectorAll("i[data-icon]").forEach(el => { el.outerHTML = icon(el.dataset.icon); });
@@ -401,6 +425,7 @@ const docs = new Map();          // path -> {doc, mtime, dirty, warned}
 let tabs = [], currentFile = null, settingValue = false, selectedDir = "";
 let claudeChanges = {};
 let chatCursor = 0, sentAnnotations = false, polling = false;
+let status = { mainExists: true }, viewOriginal = false, jobKind = "chat";
 
 // ---------------------------------------------------------------- theme ----
 const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
@@ -707,7 +732,7 @@ async function refreshTree() {
   treeData = t; mainFile = t.main; project = t.project;
   // First time this project is opened: expand every folder.
   if (!expandedLoaded) { expanded = new Set(store.get("expanded:" + project, null) ?? t.dirs); expandedLoaded = true; saveExpanded(); }
-  $("#docName").innerHTML = `${esc(project)} <small>· main: ${esc(mainFile)}</small>`;
+  $("#docName").innerHTML = `${esc(project)} <small>· ${status.mainExists ? "main: " + esc(mainFile) : "no document yet"}</small>`;
   document.title = project + " · TeX Annotator";
   renderTree(); renderTabs();
 }
@@ -868,16 +893,160 @@ async function setMain(path) {
 async function loadPdf(preserveScroll = true) {
   const viewer = $("#viewer");
   const ratio = preserveScroll && viewer.scrollHeight ? viewer.scrollTop / viewer.scrollHeight : 0;
+  const url = (viewOriginal ? "/api/raw?path=import/original.pdf&t=" : "/pdf?t=") + Date.now();
   try {
-    pdfDoc = await pdfjsLib.getDocument({ url: "/pdf?t=" + Date.now() }).promise;
+    pdfDoc = await pdfjsLib.getDocument({ url }).promise;
     textCache.clear();
   } catch (e) {
-    pdfDoc = null; $("#pages").innerHTML = ""; views = []; $("#empty").hidden = false; return;
+    pdfDoc = null; $("#pages").innerHTML = ""; views = []; updateEmpty(true); return;
   }
-  $("#empty").hidden = true;
+  updateEmpty(false);
   await renderAll();
   viewer.scrollTop = ratio * viewer.scrollHeight;
 }
+
+// ------------------------------------------------- start page, PDF import ----
+// With no LaTeX document yet, the PDF pane offers to import a PDF (Claude rebuilds it as LaTeX) or start a
+// blank document. The server does the analysis and runs Claude; the browser reads the PDF's text layer.
+const BLANK_DOC = "\\documentclass[11pt]{article}\n\\usepackage[T1]{fontenc}\n\\usepackage{lmodern}\n"
+  + "\\usepackage[a4paper,margin=25mm]{geometry}\n\n\\title{Untitled}\n\\author{}\n\\date{\\today}\n\n"
+  + "\\begin{document}\n\\maketitle\n\nStart writing here.\n\n\\end{document}\n";
+
+function updateEmpty(show = !pdfDoc) {
+  const el = $("#empty");
+  el.hidden = !show;
+  if (!show) return;
+  if (status.mainExists && !(busy && jobKind === "import")) {
+    el.innerHTML = `<p style="margin-top:80px">${viewOriginal ? "The imported PDF couldn't be shown." : "No PDF yet. Fix the compile errors shown in the chat, then Recompile."}</p>`;
+    return;
+  }
+  const name = esc(status.importSource || "the PDF");
+  const checkBox = `<label class="check"><input type="checkbox" id="importCheck" ${store.get("importCheck", true) ? "checked" : ""}>
+    <span>Check the result against the original afterwards<br><small style="color:var(--muted)">Claude looks at each original page next to the compiled one and fixes differences. Costs a little more.</small></span></label>`;
+  const fine = `<p class="fine">Uses the model chosen under the chat box: Opus is the most faithful, Sonnet costs about half as much and suits long documents.
+    A 10-page document takes a few minutes. You'll see the progress in the chat.</p>`
+    + (status.gs ? "" : `<p class="warn">Importing needs Ghostscript, which isn't installed. Ubuntu/Debian: <code>sudo apt install ghostscript</code> · macOS: <code>brew install ghostscript</code></p>`);
+  if (busy && jobKind === "import") {
+    el.innerHTML = `<div class="welcome"><h2>Rebuilding ${name} as LaTeX…</h2>
+      <p>Follow along in the chat. Claude reads the extracted text and the page images and writes the LaTeX a few pages at a time; the app compiles it${store.get("importCheck", true) ? " and Claude checks it against the original" : ""}.</p>
+      <p>The document opens here when it's done. Press Stop in the chat to cancel.</p></div>`;
+  } else if (status.importSource) {
+    el.innerHTML = `<div class="welcome" id="welcome"><h2>Rebuild ${name} as LaTeX</h2>
+      <p>Claude rebuilds the PDF as an editable LaTeX document: text as real text, tables as tables, maths as maths, and figures as images with their labels as editable text on top.</p>
+      <div class="actions"><button class="primary" data-act="convert" ${status.gs ? "" : "disabled"}>${icon("play")}Convert to LaTeX</button>
+        <button data-act="import">${icon("fileImport")}Choose another PDF…</button></div>${checkBox}${fine}</div>`;
+  } else {
+    el.innerHTML = `<div class="welcome" id="welcome"><h2>No LaTeX document here yet</h2>
+      <p>Import a PDF and Claude rebuilds it as LaTeX: text as real text, tables as tables, maths as maths, and figures as images with their labels as editable text on top. Then edit it here like any other document.</p>
+      <div class="actions"><button class="primary" data-act="import" ${status.gs ? "" : "disabled"}>${icon("fileImport")}Import a PDF…</button>
+        <button data-act="blank">${icon("filePlus")}Start a blank document</button></div>${checkBox}
+      <p class="fine">You can also drop a PDF here.</p>${fine}</div>`;
+  }
+}
+
+$("#empty").addEventListener("click", e => {
+  const act = e.target.closest("button")?.dataset.act;
+  if (act === "import") $("#importInput").click();
+  else if (act === "convert") convertPending();
+  else if (act === "blank") newBlank();
+});
+$("#empty").addEventListener("change", e => { if (e.target.id === "importCheck") store.set("importCheck", e.target.checked); });
+$("#importInput").onchange = e => { const f = e.target.files[0]; e.target.value = ""; if (f) importPdfFile(f); };
+$("#viewer").addEventListener("dragover", e => {
+  if (status.mainExists || ![...e.dataTransfer.types].includes("Files")) return;
+  e.preventDefault();
+  $("#welcome")?.classList.add("drop");
+});
+$("#viewer").addEventListener("dragleave", () => $("#welcome")?.classList.remove("drop"));
+$("#viewer").addEventListener("drop", e => {
+  if (status.mainExists) return;
+  e.preventDefault();
+  $("#welcome")?.classList.remove("drop");
+  const f = [...e.dataTransfer.files].find(f => /\.pdf$/i.test(f.name) || f.type === "application/pdf");
+  if (f) importPdfFile(f); else note("Drop a PDF file to import it.", "error");
+});
+
+async function importPdfFile(file) {
+  if (busy) return;
+  setBusy(true);
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const r = await fetch("/api/import/upload", { method: "POST", body: bytes,
+      headers: { "Content-Type": "application/pdf", "X-Filename": enc(file.name) } });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    status.importSource = j.name;
+    await startImport(bytes, j.name);
+  } catch (e) {
+    note("Import failed: " + e.message, "error");
+    setBusy(false);
+    refreshStatus().then(() => updateEmpty()).catch(() => {});
+  }
+}
+
+async function convertPending() {
+  if (busy) return;
+  setBusy(true);
+  try {
+    const r = await fetch("/api/raw?path=import/original.pdf");
+    if (!r.ok) throw new Error("couldn't read import/original.pdf");
+    await startImport(new Uint8Array(await r.arrayBuffer()), status.importSource);
+  } catch (e) {
+    note("Import failed: " + e.message, "error");
+    jobKind = "chat";
+    setBusy(false);
+    updateEmpty();
+  }
+}
+
+async function startImport(bytes, name) {
+  // The browser reads the text layer (pdf.js, see pdf-extract.js); the server does everything else.
+  setBusy(true);
+  jobKind = "import";
+  updateEmpty(true);
+  let text;
+  try {
+    text = await extractPdfText(pdfjsLib, bytes.slice(), (n, total) => setLive("", `Reading the text of ${name}: page ${n} of ${total}`));
+  } catch (e) {
+    jobKind = "chat";
+    throw new Error(/password/i.test(e.name + e.message) ? "the PDF is password-protected." : "couldn't read the PDF (" + e.message + ").");
+  }
+  const check = $("#importCheck") ? $("#importCheck").checked : store.get("importCheck", true);
+  await api("/api/import/start", { body: { text, check, model: $("#model").value, effort: $("#effort").value } });
+  pollChat();
+}
+
+async function newBlank() {
+  if (busy) return;
+  try {
+    await api("/api/files/create", { body: { path: "main.tex", content: BLANK_DOC } });
+    await afterImport();
+  } catch (e) { note(e.message, "error"); }
+}
+
+// After an import (or a new blank document): show the new document and its PDF.
+async function afterImport() {
+  const s = await refreshStatus();
+  await refreshTree();
+  claudeChanges = {};
+  viewOriginal = false;
+  setView(false, false);
+  if (s.mainExists) {
+    await api("/api/compile", { method: "POST" }).catch(() => {});
+    await openFile(s.main);
+  }
+  await loadPdf(false);
+}
+
+function setView(original, reload = true) {
+  viewOriginal = !!original && !!status.importSource;
+  document.body.dataset.view = viewOriginal ? "original" : "";
+  $("#viewOriginal").classList.toggle("active", viewOriginal);
+  if (viewOriginal) { closeEditor(true); setTool("select"); }
+  for (const id of ["toolPencil", "toolComment", "toolEraser", "undoMark", "clearMarks"]) $("#" + id).disabled = viewOriginal;
+  if (reload) loadPdf(false);
+}
+$("#viewOriginal").onclick = () => setView(!viewOriginal);
 
 async function renderAll() {
   const token = ++renderToken;
@@ -1041,7 +1210,7 @@ function toPdf(v, e) {
 function attachInput(v) {
   let current = null;
   v.overlay.addEventListener("pointerdown", e => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || viewOriginal) return;
     closeEditor(true);
     const p = toPdf(v, e);
     if (tool === "select" || e.ctrlKey || e.metaKey) { syncToSource(v, p); e.preventDefault(); return; }
@@ -1177,6 +1346,8 @@ document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); saveAndCompile(); return; }
   if (e.target.closest(".CodeMirror") || ["TEXTAREA", "INPUT", "SELECT"].includes(e.target.tagName)) return;
   if ((e.ctrlKey || e.metaKey) && e.key === "z") { e.preventDefault(); undoMark(); }
+  else if (e.key === "o" && !$("#viewOriginal").hidden) setView(!viewOriginal);
+  else if (viewOriginal) return;                     // the imported PDF is for looking at only
   else if (e.key === "s") setTool("select");
   else if (e.key === "p") setTool("pencil");
   else if (e.key === "c") setTool("comment");
@@ -1248,14 +1419,15 @@ function renderItem(it) {
   chat.insertBefore(el, chat.querySelector(".live"));
 }
 
-function setLive(partial) {
+function setLive(partial, progress = "") {
   const chat = $("#chat");
   let live = chat.querySelector(".live");
   if (!busy) { live?.remove(); return; }
   if (!live) { live = document.createElement("div"); live.className = "live"; chat.append(live); }
   live.innerHTML = partial
     ? `<div class="msg claude partial"><div class="bubble">${md(partial)}</div></div>`
-    : `<div class="typing">Claude is working</div>`;
+    : `<div class="typing">${esc((progress || "Claude is working").replace(/…$/, ""))}</div>`;
+  if (progress) scrollChat(false);
 }
 
 function scrollChat(force) {
@@ -1275,7 +1447,8 @@ async function syncChat() {
   updateMeter(j);
   if (!store.get("model", null) && j.defaultModel && [...$("#model").options].some(o => o.value === j.defaultModel)) $("#model").value = j.defaultModel;
   chatCursor = j.total;
-  setLive(j.state === "running" ? j.partial : "");
+  if (j.state === "running" && j.kind !== jobKind) { jobKind = j.kind; updateEmpty(); }
+  setLive(j.state === "running" ? j.partial : "", j.state === "running" ? j.progress : "");
   scrollChat(j.items.length > 0);
   return j;
 }
@@ -1294,6 +1467,12 @@ async function pollChat() {
   try {
     if (j.state === "done" && sentAnnotations) clearAnnotations();
     sentAnnotations = false;
+    if (j.kind === "import" && j.reload) {
+      busy = false;                                  // let the refresh below open files normally
+      jobKind = "chat";
+      await afterImport();
+      return;
+    }
     const files = Object.keys(j.changes || {});
     if (files.length) {
       claudeChanges = j.changes;
@@ -1540,7 +1719,12 @@ $("#undoClaude").onclick = async () => {
 // ---------------------------------------------------------------- status ----
 async function refreshStatus() {
   const s = await api("/api/status");
+  const changed = s.mainExists !== status.mainExists || s.importSource !== status.importSource || s.gs !== status.gs;
+  status = s;
   $("#undoClaude").disabled = busy || !s.canUndo;
+  $("#viewOriginal").hidden = !(s.importSource && s.mainExists);
+  if (viewOriginal && $("#viewOriginal").hidden) setView(false);
+  if (changed && !pdfDoc) updateEmpty(true);
   return s;
 }
 
@@ -1549,7 +1733,7 @@ setInterval(async () => {
   if (busy) return;
   let s;
   try { s = await refreshStatus(); } catch { return; }
-  if (s.pdfMtime && s.pdfMtime !== pdfMtime) { pdfMtime = s.pdfMtime; loadPdf(true); }
+  if (s.pdfMtime && s.pdfMtime !== pdfMtime) { pdfMtime = s.pdfMtime; if (!viewOriginal) loadPdf(true); }
   if (s.treeSig !== treeSig || s.main !== mainFile) { treeSig = s.treeSig; refreshTree().catch(() => {}); }
   for (const [p, d] of docs) {
     const m = s.files[p];
@@ -1571,10 +1755,11 @@ window.addEventListener("beforeunload", e => { if (anyDirty()) { e.preventDefaul
     const known = new Set(treeData.files.map(f => f.path));
     tabs = store.get("tabs:" + project, []).filter(p => known.has(p));
     const last = store.get("current:" + project, null);
-    await openFile(last && known.has(last) ? last : (tabs[0] || mainFile));
+    const first = last && known.has(last) ? last : (tabs[0] || (known.has(mainFile) ? mainFile : null));
+    if (first) await openFile(first);
     const j = await syncChat();
     if (s.compile && s.compile.ok === false) note(s.compile.errors, "error");
-    if (j.state === "running") { setBusy(true); pollChat(); }
+    if (j.state === "running") { jobKind = j.kind; setBusy(true); pollChat(); }
   } catch (e) {
     note("Couldn't reach the server: " + e.message, "error");
   }

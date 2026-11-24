@@ -5,12 +5,13 @@ Edit the source next to the compiled PDF, chat with Claude, and annotate the
 PDF (pencil + comments); Claude Code edits the source and the PDF recompiles.
 
 Usage:
-    tex-annotator                       # the LaTeX project in the current folder
+    tex-annotator                       # the LaTeX project in the current folder (or an empty folder)
     tex-annotator path/to/project       # main .tex file detected automatically
     tex-annotator path/to/main.tex      # project = that file's folder
+    tex-annotator path/to/file.pdf      # rebuild a PDF as LaTeX, in a new folder next to it
     tex-annotator --check               # check that everything it needs is installed
 
-Requires: latexmk, synctex (TeX Live), and the `claude` CLI (signed in).
+Requires: latexmk, synctex (TeX Live), and the `claude` CLI (signed in). Importing PDFs also needs Ghostscript.
 Only the Python standard library is used. Server log: ~/.cache/tex-annotator/server.log
 """
 
@@ -32,17 +33,21 @@ import threading
 import time
 import traceback
 import webbrowser
+from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 try:
     from . import __version__
+    from . import pdf_import
 except ImportError:  # run as a plain script
     __version__ = "dev"
+    import pdf_import  # type: ignore[no-redef]
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
+PROMPTS = HERE / "prompts"
 CACHE = Path.home() / ".cache" / "tex-annotator"
 LOG_PATH = CACHE / "server.log"
 TRASH = CACHE / "trash"
@@ -57,6 +62,8 @@ BUILD_SUFFIXES = (".aux", ".log", ".out", ".toc", ".lof", ".lot", ".fls", ".fdb_
 SKIP_DIRS = {"node_modules", "__pycache__", "_minted"}
 MAX_FILES = 3000
 MAX_UPLOAD = 30 * 1024 * 1024
+MAX_IMPORT = 200 * 1024 * 1024     # PDFs to import
+MAX_JSON = 120 * 1024 * 1024       # requests with JSON bodies (an imported PDF's text layer can be large)
 
 
 # --------------------------------------------------------------------------- #
@@ -120,10 +127,15 @@ class State:
         self.proc: subprocess.Popen | None = None
         self.cancelled = False
         self.undo: dict[str, str | None] | None = None  # abs path -> content before Claude's last edit (None = created)
+        self.progress = ""                 # what a long job (PDF import) is doing right now, shown while it runs
 
     @property
     def pdf(self) -> Path:
         return self.tex.with_suffix(".pdf")
+
+    @property
+    def import_dir(self) -> Path:
+        return self.root / "import"
 
 
 S: State  # set in main()
@@ -229,8 +241,24 @@ def find_main(root: Path) -> Path | None:
 # LaTeX compilation and SyncTeX
 # --------------------------------------------------------------------------- #
 
+ENGINE_COMMENT = re.compile(r"^\s*%\s*!\s*TEX\s+(?:TS-)?program\s*=\s*(pdflatex|xelatex|lualatex)\b", re.I | re.M)
+
+
+def engine() -> str:
+    """The engine to compile with: a `% !TEX program = …` line at the top of the main file wins over --engine."""
+    try:
+        head = "\n".join(S.tex.read_text(encoding="utf-8", errors="ignore").splitlines()[:30])
+    except OSError:
+        return S.engine
+    m = ENGINE_COMMENT.search(head)
+    return {"pdflatex": "pdf", "xelatex": "xe", "lualatex": "lua"}[m.group(1).lower()] if m else S.engine
+
+
 def compile_tex() -> dict:
-    engine_flag = {"pdf": "-pdf", "xe": "-xelatex", "lua": "-lualatex"}[S.engine]
+    if not S.tex.exists():                 # empty project: nothing to compile yet
+        S.last_compile = {"ok": None, "errors": "", "time": time.time()}
+        return S.last_compile
+    engine_flag = {"pdf": "-pdf", "xe": "-xelatex", "lua": "-lualatex"}[engine()]
     cmd = [
         "latexmk", engine_flag, "-synctex=1", "-interaction=nonstopmode",
         "-halt-on-error", "-file-line-error", S.tex.name,
@@ -433,6 +461,20 @@ and preserve the document's existing style, macros and structure. You may create
 - Reply concisely in Markdown. Refer to source locations as path/file.tex:LINE relative to the project folder \
 (e.g. chapters/intro.tex:42); the user can click them."""
 
+IMPORTED_NOTE = """This project was rebuilt from a PDF by the app's PDF import. import/original.pdf is the original; \
+import/pages/page-NN.png show its pages; import/extraction.md has its text and measured layout; \
+import/conversion-notes.md records how it was rebuilt. Figures are in two layers: figures/fig-NN-K.tex puts the \
+figure's labels (TikZ nodes, real text) over figures/fig-NN-K.png (the image with its text removed); \
+figures/original-graphics.pdf is the original without its text; layers/page-NN.tex is a positioned copy of a page. \
+When the user compares with the original, look at the original page image."""
+
+
+def system_prompt(extra: str = "") -> str:
+    text = SYSTEM_PROMPT.format(main=rel(S.tex))
+    if (S.import_dir / "extraction.md").exists():
+        text += "\n\n" + IMPORTED_NOTE
+    return text + ("\n\n" + extra if extra else "")
+
 
 def build_prompt(payload: dict, images: dict[int, Path]) -> str:
     out: list[str] = []
@@ -490,7 +532,8 @@ APP_TOOLS = "Read,Edit,Write,Glob,Grep"
 
 
 def run_claude(prompt: str, extra_dirs: list[str], resume: str | None = None,
-               model: str | None = None, effort: str | None = None) -> tuple[bool, str, str | None]:
+               model: str | None = None, effort: str | None = None,
+               system: str | None = None) -> tuple[bool, str, str | None]:
     claude = shutil.which("claude")
     if not claude:
         return False, "The `claude` CLI was not found on PATH.", None
@@ -503,7 +546,7 @@ def run_claude(prompt: str, extra_dirs: list[str], resume: str | None = None,
         "--tools", APP_TOOLS, "--allowedTools", *APP_TOOLS.split(","),
         "--strict-mcp-config", "--disable-slash-commands",
         "--restricted",   # no command-running tools, ignore user/project settings, file tools stay in the project
-        "--append-system-prompt", SYSTEM_PROMPT.format(main=rel(S.tex)),
+        "--append-system-prompt", system or system_prompt(),
     ]
     for d in extra_dirs:
         cmd += ["--add-dir", d]
@@ -660,6 +703,306 @@ def describe_attachments(payload: dict) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# PDF import: take the PDF apart (pdf_import.py), then Claude rebuilds it as LaTeX, a few pages at a time
+# --------------------------------------------------------------------------- #
+
+PART_WORDS = int(os.environ.get("TEX_ANNOTATOR_PART_WORDS", 2600))   # a part is about this many words…
+PART_PAGES = int(os.environ.get("TEX_ANNOTATOR_PART_PAGES", 8))       # …and at most this many pages
+CHECK_PAGES = 12    # most compiled pages shown to Claude when it checks a part against the original
+
+
+def import_source() -> dict | None:
+    """The PDF waiting in import/ (uploaded, or given on the command line), if any."""
+    if not (S.import_dir / "original.pdf").exists():
+        return None
+    try:
+        return json.loads((S.import_dir / "source.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"name": "original.pdf"}
+
+
+def plan_parts(pages: list[dict]) -> list[list[int]]:
+    parts, cur, weight = [], [], 0
+    for p in pages:
+        w = max(p["words"], 80) + 150 * len(p["figures"]) + (600 if p["scan"] else 0)
+        if cur and (weight + w > PART_WORDS or len(cur) >= PART_PAGES):
+            parts.append(cur)
+            cur, weight = [], 0
+        cur.append(p["n"])
+        weight += w
+    return parts + [cur] if cur else parts
+
+
+def page_range(ns: list[int]) -> str:
+    return f"page {ns[0]}" if len(ns) == 1 else f"pages {ns[0]}–{ns[-1]}"
+
+
+def part_prompt(k: int, parts: list[list[int]], analysis: dict) -> str:
+    """What Claude is asked to do for part k (the process itself is in prompts/pdf-import.md)."""
+    ns, K, total, name = parts[k], len(parts), len(analysis["pages"]), analysis["source"]
+    tag = lambda n: pdf_import.page_tag(n, total)  # noqa: E731
+    a, b = analysis["pages"][ns[0] - 1]["lines"][0], analysis["pages"][ns[-1] - 1]["lines"][1]
+    s0, s1 = analysis["summary_lines"]
+    images = (", ".join(f"import/pages/page-{tag(n)}.png" for n in ns) if len(ns) <= 4
+              else f"import/pages/page-{tag(ns[0])}.png to page-{tag(ns[-1])}.png")
+    if K == 1:
+        head = [f"# Rebuild {name} as LaTeX",
+                f"The user imported `{name}` ({total} page{'s' * (total != 1)}) and wants it as an editable LaTeX "
+                "project. Everything is prepared: follow the PDF-to-LaTeX process in your instructions."]
+        steps = [f"Read import/extraction.md lines {s0}–{s1} (the summary), then lines {a}–{b} (the pages).",
+                 f"Look at the page images: {images}.",
+                 "Write the whole document into main.tex."]
+    elif k == 0:
+        head = [f"# Rebuild {name} as LaTeX: part 1 of {K} ({page_range(ns)})",
+                f"The user imported `{name}` ({total} pages) and wants it as an editable LaTeX project. Everything is "
+                "prepared: follow the PDF-to-LaTeX process in your instructions. The document is long, so it is "
+                f"converted in {K} parts, each in its own conversation. This is the first."]
+        steps = [f"Read import/extraction.md lines {s0}–{s1} (the summary of the whole document), then lines {a}–{b} "
+                 f"({page_range(ns)}).",
+                 f"Look at the page images of this part ({images}), and at a few from later in the document, so the "
+                 "preamble suits all of it.",
+                 "Write main.tex: the complete preamble for the whole document, \\begin{document}, then "
+                 + ", ".join(f"\\input{{content/part-{i + 1}}}" for i in range(K))
+                 + " (one per line, in this order), then \\end{document}. The part files exist and are empty for now.",
+                 f"Write {page_range(ns)} into content/part-1.tex."]
+    else:
+        head = [f"# Rebuild {name} as LaTeX: part {k + 1} of {K} ({page_range(ns)})",
+                "The earlier parts were converted in other conversations, following the PDF-to-LaTeX process in your "
+                "instructions. Continue seamlessly in the same style."]
+        steps = [f"Read import/conversion-notes.md, the preamble of main.tex, and the last 40 lines of content/part-{k}.tex.",
+                 f"Read import/extraction.md lines {a}–{b} ({page_range(ns)}); the summary is in lines {s0}–{s1} if "
+                 f"you need it. Look at the page images: {images}.",
+                 f"Write {page_range(ns)} into content/part-{k + 1}.tex. Change the preamble only if this part needs "
+                 "something new, and keep it right for the earlier parts."]
+    scans = [n for n in ns if analysis["pages"][n - 1]["scan"]]
+    if scans:
+        steps.append(f"{page_range(scans).capitalize()} ha{'s' if len(scans) == 1 else 've'} no usable text layer: "
+                     "transcribe from the -hires page images, as the extraction explains.")
+    steps.append("Write import/conversion-notes.md" + (" (create it)" if k == 0 else " (update it)") + ": the decisions "
+                 "that later parts and later edits must follow (fonts and packages, how each S-style is set, macros and "
+                 "environments you defined, list and table conventions)"
+                 + (", and where this part ends (for example in the middle of a paragraph or a list)" if K > 1 else "")
+                 + ". Keep it short.")
+    steps.append("Finish with a short summary for the user: how you rebuilt each page (flowing or positioned) and anything "
+                 "you could not reproduce faithfully. The app compiles the document right after your turn, so don't "
+                 "mention compiling.")
+    return "\n".join(head + [""] + [f"{i}. {s}" for i, s in enumerate(steps, 1)])
+
+
+def check_prompt(orig: list[int], compiled: list[int], total: int) -> str:
+    o = ", ".join(f"import/pages/page-{pdf_import.page_tag(n, total)}.png" for n in orig)
+    c = ", ".join(f"import/check/page-{n:02d}.png" for n in compiled)
+    return ("It compiles. Now check your work against the original: compare the original pages "
+            f"({o}) with the compiled pages ({c}). The compiled document reflows, so line and page breaks won't match "
+            "exactly, and that's fine. Fix real differences: missing, extra or out-of-order text; wrong heading levels "
+            "or numbering; lists, tables or maths that don't match; figures that are missing, misplaced, or have wrong "
+            "or doubled labels; clearly wrong fonts, sizes, colours or spacing. If it all matches, change nothing. "
+            "Reply with one short line per fix (the app recompiles after your turn, so don't mention compiling).")
+
+
+def compiled_pages(file_rel: str) -> list[int]:
+    """Pages of the compiled PDF that show a .tex file's content (via SyncTeX)."""
+    try:
+        lines = (S.root / file_rel).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    body = [i + 1 for i, ln in enumerate(lines) if ln.strip() and not ln.lstrip().startswith("%")]
+    pages = set()
+    for ln in body[:6] + body[len(body) // 2:len(body) // 2 + 2] + body[-6:]:
+        box = synctex_view(file_rel, ln)
+        if box:
+            pages.add(box["page"])
+    return list(range(min(pages), max(pages) + 1)) if pages else []
+
+
+def render_check_pages(file_rel: str | None) -> list[int]:
+    """Render the compiled pages for a part (or all of them) to import/check/page-NN.png."""
+    if not S.pdf.exists():
+        return []
+    out = S.import_dir / "check"
+    out.mkdir(parents=True, exist_ok=True)
+    for old in out.glob("*.png"):
+        old.unlink()
+    if file_rel:
+        pages = compiled_pages(file_rel)
+        if not pages:
+            return []
+        first, last = pages[0], pages[-1]
+    else:
+        first, last = 1, CHECK_PAGES
+    last = min(last, first + CHECK_PAGES - 1)
+    pdf_import.run_gs(["-sDEVICE=png16m", "-r100", "-dTextAlphaBits=4", "-dGraphicsAlphaBits=4",
+                       f"-dFirstPage={first}", f"-dLastPage={last}", "-o", str(out / "tmp-%03d.png"), str(S.pdf)])
+    done = []
+    for i, f in enumerate(sorted(out.glob("tmp-*.png"))):
+        f.rename(out / f"page-{first + i:02d}.png")
+        done.append(first + i)
+    return done
+
+
+def compile_and_fix(session: str | None, run) -> tuple[dict, str | None]:
+    """Compile; if it fails, let Claude (same conversation) fix it, twice at most."""
+    S.progress = "Compiling…"
+    comp = compile_tex()
+    for _ in range(2):
+        if comp["ok"] or S.cancelled or not session:
+            break
+        log("It doesn't compile yet. Asking Claude to fix it…", "status")
+        S.progress = "Claude is fixing the compile errors…"
+        _, _, session2 = run("The document doesn't compile. Fix these errors, keeping all the content (the app "
+                             "recompiles after your turn, so don't mention compiling):\n\n" + comp["errors"], session)
+        session = session2 or session
+        S.progress = "Compiling…"
+        comp = compile_tex()
+    return comp, session
+
+
+GENERATED = re.compile(r"^(figures/fig-\d+-\d+\.(png|tex)|layers/page-\d+\.tex|figures/original-graphics\.pdf)$")
+
+
+def tidy_import() -> list[str]:
+    """Move generated files the LaTeX doesn't use (figures, positioned pages) to import/unused/."""
+    gen = defaultdict(list)                                 # "figures/fig-02-1" -> its .png and .tex
+    for d in ("figures", "layers"):
+        for p in (S.root / d).glob("*"):
+            r = rel(p)
+            if GENERATED.match(r):
+                gen[r.rsplit(".", 1)[0]].append(p)
+    own = [p for p in text_files() if p.suffix == ".tex" and not rel(p).startswith(("figures/", "layers/", "import/"))]
+    text = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in own)
+    used, grew = set(), True
+    while grew:                                             # snippets that are used can use other files
+        grew = False
+        for key, files in gen.items():
+            if key not in used and re.search(re.escape(key) + r"(?![\w-])", text):
+                used.add(key)
+                grew = True
+                for f in files:
+                    if f.suffix == ".tex":
+                        text += "\n" + f.read_text(encoding="utf-8", errors="ignore")
+    moved = []
+    for key, files in gen.items():
+        if key in used:
+            continue
+        for f in files:
+            dest = S.import_dir / "unused" / rel(f)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(f), str(dest))
+            moved.append(rel(f))
+    for d in ("layers", "figures"):
+        try:
+            (S.root / d).rmdir()                            # only if now empty
+        except OSError:
+            pass
+    return moved
+
+
+def restore_unused(moved: list[str]):
+    for r in moved:
+        src = S.import_dir / "unused" / r
+        if src.exists():
+            (S.root / r).parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(S.root / r))
+
+
+def import_worker(payload: dict):
+    """The whole PDF import, as one job: analyse, convert part by part, compile, check, tidy."""
+    model = payload.get("model") if payload.get("model") in MODELS else None
+    effort = payload.get("effort") if payload.get("effort") in EFFORTS else None
+    check = payload.get("check", True)
+    ok_all = False
+    try:
+        src = import_source() or {}
+        name = src.get("name") or "original.pdf"
+        S.progress = f"Taking {name} apart…"
+        log(f"Taking {name} apart: text, layout, fonts, figures…", "status")
+
+        def progress(msg):
+            S.progress = msg
+        analysis = pdf_import.analyse(S.import_dir / "original.pdf", payload.get("text") or {}, S.root,
+                                      progress=progress, source_name=name)
+        pages = analysis["pages"]
+        notes = []
+        if analysis["scanned_pages"]:
+            notes.append(f"no text layer on {page_range(analysis['scanned_pages'])} (Claude will read those from the images)")
+        if analysis["designed_pages"]:
+            notes.append(f"{page_range(analysis['designed_pages'])} look{'s' * (len(analysis['designed_pages']) == 1)} designed")
+        log(f"{name}: {len(pages)} page{'s' * (len(pages) != 1)}, {analysis['words']:,} words, {analysis['figures']} "
+            f"figure{'s' * (analysis['figures'] != 1)}" + ("; " + "; ".join(notes) if notes else "")
+            + f". Page images, figures and the extraction are in import/, figures/ and layers/.", "info")
+        if S.cancelled:
+            log("Stopped.", "info")
+            return
+        parts = plan_parts(pages)
+        S.tex = S.root / "main.tex"
+        if len(parts) > 1:
+            (S.root / "content").mkdir(exist_ok=True)
+            for i, ns in enumerate(parts, 1):
+                f = S.root / "content" / f"part-{i}.tex"
+                if not f.exists():
+                    f.write_text(f"% Part {i}: {page_range(ns)} of the original (not converted yet)\n", encoding="utf-8")
+            log(f"Converting it in {len(parts)} parts of a few pages each, so every page gets Claude's full attention.", "info")
+        system = system_prompt((PROMPTS / "pdf-import.md").read_text(encoding="utf-8"))
+
+        def run(prompt, resume=None):
+            try:   # keep the last prompt for troubleshooting, as for chat messages
+                (CACHE / "last-prompt.md").write_text(prompt, encoding="utf-8")
+            except OSError:
+                pass
+            return run_claude(prompt, [], resume=resume, model=model, effort=effort, system=system)
+
+        for k, ns in enumerate(parts):
+            if S.cancelled:
+                break
+            label = f" (part {k + 1} of {len(parts)})" if len(parts) > 1 else ""
+            S.progress = f"Claude is rebuilding {page_range(ns)}{label}…"
+            log(f"Rebuilding {page_range(ns)}{label}…", "status")
+            ok, result, session = run(part_prompt(k, parts, analysis))
+            if not ok:
+                log(result or "Claude couldn't finish this part.", "info" if S.cancelled else "error")
+                break
+            comp, session = compile_and_fix(session, run)
+            if check and comp["ok"] and not S.cancelled:
+                S.progress = f"Claude is comparing {page_range(ns)} with the original…"
+                shown = render_check_pages(None if len(parts) == 1 else f"content/part-{k + 1}.tex")
+                if shown:
+                    log(f"Checking {page_range(ns)} against the original…", "status")
+                    _, _, session2 = run(check_prompt(ns, shown, len(pages)), session)
+                    comp, _ = compile_and_fix(session2 or session, run)
+            if not comp["ok"] and not S.cancelled:
+                log("Still not compiling:\n" + comp["errors"], "error")
+        else:
+            ok_all = True
+        if not S.cancelled and S.tex.exists():
+            S.progress = "Tidying up…"
+            moved = tidy_import()
+            comp = compile_tex()
+            if moved and not comp["ok"]:
+                restore_unused(moved)
+                comp = compile_tex()
+                moved = []
+            if moved:
+                log(f"Moved {len(moved)} generated file{'s' * (len(moved) != 1)} the document doesn't use to import/unused/.", "info")
+            if comp["ok"]:
+                log(f"Done: {name} is now main.tex. Use the Original button to compare it with the PDF you imported, "
+                    "and mark up anything that's off.", "ok")
+            ok_all = ok_all and bool(comp["ok"])
+    except pdf_import.PdfImportError as e:
+        log(str(e), "error")
+    except Exception as e:  # noqa: BLE001
+        slog("import failed:\n" + traceback.format_exc())
+        log(f"The import failed: {e}", "error")
+    finally:
+        S.progress = ""
+        S.session_id = None        # the next chat message starts a fresh conversation about the result
+        S.undo = None
+        with S.lock:
+            S.job["changes"] = {}
+            S.job["reload"] = True
+            S.job["state"] = "done" if ok_all else "error"
+
+
+# --------------------------------------------------------------------------- #
 # HTTP server
 # --------------------------------------------------------------------------- #
 
@@ -692,7 +1035,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def read_json(self):
         n = int(self.headers.get("Content-Length", 0))
-        if n > MAX_UPLOAD * 1.4:
+        if n > MAX_JSON:
             raise ValueError("Request too large")
         return json.loads(self.rfile.read(n) or b"{}")
 
@@ -732,6 +1075,8 @@ class Handler(BaseHTTPRequestHandler):
         path = url.path
         if path in ("/", "/index.html"):
             return self.send_file(STATIC / "index.html", "text/html; charset=utf-8")
+        if path == "/pdf-extract.js":
+            return self.send_file(STATIC / "pdf-extract.js", "text/javascript; charset=utf-8")
         if path == "/pdf":
             return self.send_file(S.pdf, "application/pdf")
         if path.startswith("/vendor/"):
@@ -741,9 +1086,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_file(f)
         if path == "/api/status":
             dirs, files = walk_project()
+            src = import_source()
             return self.send_json({
                 "project": S.root.name,
                 "main": rel(S.tex),
+                "mainExists": S.tex.exists(),
+                "importSource": src.get("name") if src else None,
+                "imported": (S.import_dir / "extraction.md").exists(),
+                "gs": bool(pdf_import.gs_path()),
                 "pdfExists": S.pdf.exists(),
                 "pdfMtime": S.pdf.stat().st_mtime if S.pdf.exists() else 0,
                 "compile": S.last_compile,
@@ -793,14 +1143,17 @@ class Handler(BaseHTTPRequestHandler):
                     "items": S.transcript[since:], "total": len(S.transcript),
                     "partial": S.partial, "hasSession": S.session_id is not None,
                     "contextTokens": S.context_tokens, "chatCost": round(S.chat_cost, 4),
-                    "defaultModel": S.model,
+                    "defaultModel": S.model, "progress": S.progress,
+                    "kind": S.job.get("kind", "chat"), "reload": S.job.get("reload", False),
                 })
         self.send_error(404)
 
     # ----------------------------------------------------------------- POST
     def do_POST(self):
-        # A JSON content type forces browsers to preflight cross-site requests, which this server never approves.
-        if not self.from_this_app() or not (self.headers.get("Content-Type") or "").startswith("application/json"):
+        # A JSON (or PDF) content type forces browsers to preflight cross-site requests, which this server never approves.
+        ctype = self.headers.get("Content-Type") or ""
+        allowed = ctype.startswith("application/json") or (self.path == "/api/import/upload" and ctype.startswith("application/pdf"))
+        if not self.from_this_app() or not allowed:
             return self.send_json({"error": "Forbidden"}, 403)
         try:
             return self.route_post()
@@ -908,6 +1261,47 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=chat_worker, args=(payload,), daemon=True, name="claude-chat").start()
             return self.send_json({"ok": True})
 
+        if self.path == "/api/import/upload":
+            # The raw PDF, saved as import/original.pdf; converting it is a separate step (/api/import/start).
+            if self.busy():
+                return
+            if S.tex.exists():
+                return self.send_json({"error": "This project already has a LaTeX document. To import a PDF, start "
+                                                 "tex-annotator in an empty folder, or run: tex-annotator path/to/file.pdf"}, 409)
+            n = int(self.headers.get("Content-Length", 0))
+            if n > MAX_IMPORT:
+                return self.send_json({"error": f"The PDF is larger than {MAX_IMPORT // 2**20} MB."}, 400)
+            data = self.rfile.read(n)
+            if b"%PDF" not in data[:1024]:
+                return self.send_json({"error": "That file isn't a PDF."}, 400)
+            name = Path(unquote(self.headers.get("X-Filename") or "document.pdf")).name or "document.pdf"
+            S.import_dir.mkdir(exist_ok=True)
+            (S.import_dir / "original.pdf").write_bytes(data)
+            (S.import_dir / "source.json").write_text(json.dumps({"name": name, "bytes": len(data)}), encoding="utf-8")
+            slog(f"import: received {name} ({len(data)} bytes)")
+            return self.send_json({"ok": True, "name": name})
+
+        if self.path == "/api/import/start":
+            payload = self.read_json()
+            src = import_source()
+            if not src:
+                return self.send_json({"error": "Upload a PDF first."}, 400)
+            if S.tex.exists():
+                return self.send_json({"error": "This project already has a LaTeX document."}, 409)
+            if not pdf_import.gs_path():
+                return self.send_json({"error": pdf_import.GS_MISSING}, 400)
+            with S.lock:
+                if S.job["state"] == "running":
+                    return self.send_json({"error": "Claude is still working on the last message."}, 409)
+                S.job = {"state": "running", "changes": {}, "kind": "import"}
+                S.cancelled = False
+            pages = len((payload.get("text") or {}).get("pages") or [])
+            log(f"Rebuild {src.get('name')} as LaTeX", "user",
+                attach=f"{pages} page{'s' * (pages != 1)}" + (", check against the original" if payload.get("check", True) else ""))
+            slog("import started")
+            threading.Thread(target=import_worker, args=(payload,), daemon=True, name="pdf-import").start()
+            return self.send_json({"ok": True})
+
         if self.path == "/api/chat/new":
             if S.job["state"] == "running":
                 return self.send_json({"error": "Stop Claude first."}, 409)
@@ -990,6 +1384,9 @@ def check_requirements() -> bool:
         path = shutil.which(tool)
         line(bool(path), tool, version([tool, "--version"]) if path else hint)
         ok &= bool(path)
+    gs = pdf_import.gs_path()
+    print(f"  {'OK ' if gs else 'missing'}  {'gs':<10} " + (version([gs, "--version"]) + "  (for importing PDFs)" if gs else
+          "only needed to import PDFs. Ubuntu/Debian: sudo apt install ghostscript · macOS: brew install ghostscript"))
     claude = shutil.which("claude")
     if not claude:
         line(False, "claude", "Install Claude Code (https://claude.com/claude-code), then run `claude` once to sign in")
@@ -1007,6 +1404,23 @@ def check_requirements() -> bool:
         ok &= signed_in
     print("\nAll set." if ok else "\nInstall the missing pieces above, then run `tex-annotator --check` again.")
     return ok
+
+
+def project_for_pdf(pdf: Path) -> Path:
+    """`tex-annotator report.pdf` works in report-latex/ next to the PDF, with the PDF waiting in import/."""
+    for i in range(1, 100):
+        root = pdf.parent / (f"{pdf.stem}-latex" if i == 1 else f"{pdf.stem}-latex-{i}")
+        if (root / "import" / "original.pdf").exists() or (root.is_dir() and find_main(root)):
+            return root                                      # an earlier import of it: carry on there
+        if root.exists() and any(root.iterdir()):
+            continue                                         # someone else's folder: don't touch it
+        (root / "import").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(pdf, root / "import" / "original.pdf")
+        (root / "import" / "source.json").write_text(json.dumps({"name": pdf.name, "bytes": pdf.stat().st_size}),
+                                                    encoding="utf-8")
+        print(f"Made a project folder for {pdf.name}: {root}")
+        return root
+    sys.exit(f"Couldn't find a free folder name next to {pdf}.")
 
 
 def main():
@@ -1027,18 +1441,18 @@ def main():
         sys.exit(0 if check_requirements() else 1)
 
     target = Path(args.project).expanduser().resolve()
-    if target.is_dir():
+    if target.is_file() and target.suffix.lower() == ".pdf":
+        root = project_for_pdf(target)
+        tex = find_main(root) or root / "main.tex"
+    elif target.is_dir():
         root = target
         if root == Path.home() or root == Path(root.anchor):
             sys.exit(f"{root} is your whole home/root folder. Run tex-annotator inside a LaTeX project folder instead.")
-        tex = find_main(root)
-        if not tex:
-            sys.exit(f"No .tex file with \\documentclass found in {root}.\n"
-                     f"Run tex-annotator inside a LaTeX project folder, or pass the main .tex file: tex-annotator path/to/main.tex")
+        tex = find_main(root) or root / "main.tex"   # no document yet: the page offers to import a PDF or start one
     elif target.is_file() and target.suffix == ".tex":
         root, tex = target.parent, target
     else:
-        sys.exit(f"Not a folder or .tex file: {target}")
+        sys.exit(f"Not a folder, .tex or .pdf file: {target}")
     missing = [t for t in ("latexmk", "synctex", "claude") if not shutil.which(t)]
     if missing:
         print(f"warning: not found: {', '.join(missing)}. Run `tex-annotator --check` for help.", file=sys.stderr)
@@ -1046,10 +1460,15 @@ def main():
     install_crash_logging()
     S = State(root, tex, args.engine, args.model)
     slog(f"starting for project {root} (main {rel(tex)})")
-    print(f"Project: {root}\nMain document: {rel(tex)}")
-    print(f"Compiling (first build can take a little while)…")
-    res = compile_tex()
-    print("  ok" if res["ok"] else "  compile failed:\n" + res["errors"])
+    print(f"Project: {root}")
+    if tex.exists():
+        print(f"Main document: {rel(tex)}\nCompiling (first build can take a little while)…")
+        res = compile_tex()
+        print("  ok" if res["ok"] else "  compile failed:\n" + res["errors"])
+    elif import_source():
+        print(f"Ready to rebuild {import_source().get('name')} as LaTeX: press Convert on the page.")
+    else:
+        print("No LaTeX document here yet: the page lets you import a PDF or start a blank document.")
 
     server, port = None, args.port
     for port in range(args.port, args.port + 20):

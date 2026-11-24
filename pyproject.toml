@@ -20,4 +20,4 @@ packages = ["tex_annotator"]
 version = { attr = "tex_annotator.__version__" }
 
 [tool.setuptools.package-data]
-tex_annotator = ["static/*.html", "static/vendor/*"]
+tex_annotator = ["static/*.html", "static/*.js", "static/vendor/*", "prompts/*.md"]
