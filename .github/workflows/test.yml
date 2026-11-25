@@ -123,6 +123,8 @@ jobs:
           Step "initexmf --admin AutoInstall" { initexmf --admin --set-config-value=[MPM]AutoInstall=1 }
           Step "initexmf AutoInstall" { initexmf --set-config-value=[MPM]AutoInstall=1 }
           Step "miktex update-package-database" { miktex --admin packages update-package-database }
+          # the test documents' packages, installed now so a flaky mirror can't fail the test later
+          Step "miktex packages install" { miktex --admin packages install geometry pgf xcolor graphics tools latexmk }
           Step "latexmk --version" { latexmk --version }
       # ---- the installed command works
       - name: latex-copilot --version (macOS, Ubuntu)

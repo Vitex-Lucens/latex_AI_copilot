@@ -126,7 +126,11 @@ def main():
                                        encoding="utf-8")
         app.S = app.State(peek, peek / "main.tex", "pdf", None)
         res = app.compile_tex()
-        assert not res["ok"], "LaTeX read a file outside the project"
+        if res["ok"]:
+            env = dict(os.environ, openin_any="p")
+            var = subprocess.run(["kpsewhich", "-var-value=openin_any"], capture_output=True, text=True, env=env).stdout
+            ver = subprocess.run(["pdflatex", "--version"], capture_output=True, text=True).stdout.splitlines()[0]
+            raise AssertionError(f"LaTeX read a file outside the project (openin_any seen by kpsewhich: {var.strip()!r}; {ver})")
         print("refused, as it should be:", (res["errors"].splitlines() or [""])[0][:100])
         app.S = app.State(proj, proj / "main.tex", "pdf", None)
 

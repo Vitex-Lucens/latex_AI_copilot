@@ -281,6 +281,21 @@ def engine() -> str:
     return {"pdflatex": "pdf", "xelatex": "xe", "lualatex": "lua"}[m.group(1).lower()] if m else S.engine
 
 
+TEX_DIST: dict = {}
+
+
+def tex_distribution() -> str:
+    """'miktex' or 'texlive' (asked once)."""
+    if "name" not in TEX_DIST:
+        try:
+            out = subprocess.run(["pdflatex", "--version"], capture_output=True, text=True, encoding="utf-8",
+                                 errors="replace", timeout=30, stdin=subprocess.DEVNULL).stdout
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        TEX_DIST["name"] = "miktex" if "miktex" in out.lower() else "texlive"
+    return TEX_DIST["name"]
+
+
 def compile_tex() -> dict:
     if not S.tex.exists():                 # empty project: nothing to compile yet
         S.last_compile = {"ok": None, "errors": "", "time": time.time()}
@@ -295,8 +310,12 @@ def compile_tex() -> dict:
         # by Claude after reading a booby-trapped document) could run anything, so it's ignored unless trusted.
         cmd.insert(1, "-norc")
     # TeX Live: LaTeX may only read and write files in the project (and its own installation), so a document
-    # can't pull other files from the computer (e.g. \input{~/.ssh/...}) into the PDF.
-    env = dict(os.environ, openin_any="p", openout_any="p")
+    # can't pull other files from the computer (e.g. \input{~/.ssh/...}) into the PDF. Newer TeX Live ignores
+    # the environment variable, so the engines also get it as a configuration line. (MiKTeX has neither.)
+    env = dict(os.environ)
+    if tex_distribution() == "texlive":
+        env.update(openin_any="p", openout_any="p")
+        cmd.insert(1, "-latexoption=-cnf-line=openin_any=p")
     with S.compile_lock:
         proc = subprocess.run(cmd, cwd=S.tex.parent, capture_output=True, text=True, encoding="utf-8",
                               errors="replace", stdin=subprocess.DEVNULL, env=env)
