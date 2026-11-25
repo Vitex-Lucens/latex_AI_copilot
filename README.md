@@ -102,7 +102,7 @@ latex-copilot [PROJECT | MAIN.tex | FILE.pdf] [--engine pdf|xe|lua] [--model MOD
   - Press **New chat** when you move on to something unrelated: every message re-sends the whole conversation, and the meter turns orange when it gets long.
   - Your PDF annotations are sent compactly: the text they cover, the matching `.tex` lines, and a small cropped image only for pencil marks.
   - Claude starts with only the file tools this app needs. None of your other Claude Code plugins, connectors or skills are loaded.
-- **Security:** the app runs on your computer and only accepts connections from your own browser, with its access key. Compiling never runs code from the project (no `latexmkrc`, no shell escape), and with TeX Live a document can't read files outside its project. Claude can only read and edit files in the project. See [SECURITY.md](SECURITY.md).
+- **Security:** the app runs on your computer and only accepts connections from your own browser, with its access key. Compiling never runs code from the project (no `latexmkrc`, no shell escape); with older TeX Live a document also can't read files outside its project (newer TeX Live and MiKTeX don't enforce that). Claude can only read and edit files in the project. See [SECURITY.md](SECURITY.md).
 - **Privacy:** only what you send to Claude leaves your machine: your messages, the files it reads, and images of the pages you annotated. Importing a PDF sends Claude the extracted text and images of the pages.
 - **Problems?** Run `latex-copilot --check`. If the page shows "Lost connection", look at the terminal where Latex-Copilot is running, and at `~/.cache/latex-copilot/server.log`. To see exactly what was last sent to Claude, open `~/.cache/latex-copilot/last-prompt.md`.
 
