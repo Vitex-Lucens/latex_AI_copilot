@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/banner.png" alt="Latex-Copilot" width="640"></p>
+<p align="center"><img src="docs/banner.png" alt="Latex-Copilot" width="440"></p>
 
 # Latex-Copilot
 
