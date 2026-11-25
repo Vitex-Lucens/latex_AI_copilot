@@ -1,6 +1,6 @@
 // Reads a PDF's text layer for "Import PDF": every text run with its exact position, size,
 // direction and font, plus page sizes, links, bookmarks and document info. The server turns this
-// into lines, blocks, styles and figure labels (tex_annotator/pdf_import.py).
+// into lines, blocks, styles and figure labels (latex_copilot/pdf_import.py).
 //
 // Coordinates are PDF points in the displayed page (crop box and page rotation applied), with the
 // origin at the TOP-left and y pointing down, which matches how Ghostscript renders the pages.

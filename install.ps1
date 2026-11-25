@@ -1,4 +1,4 @@
-# tex-annotator installer for Windows 10 (1809 or later) and Windows 11.
+# Latex-Copilot installer for Windows 10 (1809 or later) and Windows 11.
 #
 #   irm https://raw.githubusercontent.com/Vitex-Lucens/latex_AI_copilot/main/install.ps1 | iex
 #   double-click install.cmd    in a copy of the repository (git clone or zip)
@@ -6,15 +6,15 @@
 #
 # It installs whatever is missing, asking before each step: Python, MiKTeX (TeX) and Strawberry Perl (which
 # latexmk needs) with winget, Ghostscript with its official installer, and Claude Code with Anthropic's.
-# Then it installs the app into %LOCALAPPDATA%\tex-annotator, with a `tex-annotator` command.
+# Then it installs the app into %LOCALAPPDATA%\latex-copilot, with a `latex-copilot` command.
 # Run it again at any time to update. The app itself needs no admin rights.
 #
 # Settings (environment variables; -Yes, -SkipPrereqs and -Uninstall also work after install.cmd):
-#   TEX_ANNOTATOR_YES=1            answer yes to every question
-#   TEX_ANNOTATOR_SKIP_PREREQS=1   install only the app
-#   TEX_ANNOTATOR_NO_CLAUDE=1      don't offer to install Claude Code
-#   TEX_ANNOTATOR_REF=<branch|tag> the version to download (default: main)
-#   TEX_ANNOTATOR_SOURCE=<folder or .zip URL>   install from there instead of GitHub
+#   LATEX_COPILOT_YES=1            answer yes to every question
+#   LATEX_COPILOT_SKIP_PREREQS=1   install only the app
+#   LATEX_COPILOT_NO_CLAUDE=1      don't offer to install Claude Code
+#   LATEX_COPILOT_REF=<branch|tag> the version to download (default: main)
+#   LATEX_COPILOT_SOURCE=<folder or .zip URL>   install from there instead of GitHub
 #
 # Written for Windows PowerShell 5.1 (built into Windows), ASCII only, and without `exit`, which would
 # close the window when this runs through `irm | iex`.
@@ -25,15 +25,15 @@
     # GitHub needs TLS 1.2, which older Windows PowerShell doesn't always switch on by itself.
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $Repo = "Vitex-Lucens/latex_AI_copilot"
-    $Ref = if ($env:TEX_ANNOTATOR_REF) { $env:TEX_ANNOTATOR_REF } else { "main" }
-    $Prefix = Join-Path $env:LOCALAPPDATA "tex-annotator"
+    $Ref = if ($env:LATEX_COPILOT_REF) { $env:LATEX_COPILOT_REF } else { "main" }
+    $Prefix = Join-Path $env:LOCALAPPDATA "latex-copilot"
     $AppDir = Join-Path $Prefix "app"
     $BinDir = Join-Path $Prefix "bin"
-    $Launcher = Join-Path $BinDir "tex-annotator.cmd"
+    $Launcher = Join-Path $BinDir "latex-copilot.cmd"
     $ClaudeBin = Join-Path $env:USERPROFILE ".local\bin"
-    $Uninstall = ($args -contains "-Uninstall") -or ($env:TEX_ANNOTATOR_UNINSTALL -eq "1")
-    $AssumeYes = ($args -contains "-Yes") -or ($env:TEX_ANNOTATOR_YES -eq "1")
-    $SkipPrereqs = ($args -contains "-SkipPrereqs") -or ($env:TEX_ANNOTATOR_SKIP_PREREQS -eq "1")
+    $Uninstall = ($args -contains "-Uninstall") -or ($env:LATEX_COPILOT_UNINSTALL -eq "1")
+    $AssumeYes = ($args -contains "-Yes") -or ($env:LATEX_COPILOT_YES -eq "1")
+    $SkipPrereqs = ($args -contains "-SkipPrereqs") -or ($env:LATEX_COPILOT_SKIP_PREREQS -eq "1")
 
     function Say([string]$text) { Write-Host "  $text" }
     function Bold([string]$text) { Write-Host $text -ForegroundColor Cyan }
@@ -128,6 +128,12 @@
             $exe = Join-Path ([IO.Path]::GetTempPath()) $asset.name
             Say "Downloading $($asset.name) from Artifex, Ghostscript's makers..."
             Invoke-WebRequest -UseBasicParsing -Uri $asset.browser_download_url -OutFile $exe
+            # It runs with admin rights, so it must carry Artifex's valid code signature.
+            $sig = Get-AuthenticodeSignature -FilePath $exe
+            if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Subject -notmatch "Artifex Software") {
+                Remove-Item $exe -ErrorAction SilentlyContinue
+                throw "the download isn't signed by Artifex Software (signature: $($sig.Status)), so it wasn't run"
+            }
             Say "Installing it (Windows asks for permission)..."
             Start-Process -FilePath $exe -ArgumentList "/S" -Verb RunAs -Wait
             Remove-Item $exe -ErrorAction SilentlyContinue
@@ -155,23 +161,23 @@
     if ($Uninstall) {
         if (Test-Path $Prefix) { Remove-Item -Recurse -Force $Prefix }
         Remove-UserPath $BinDir
-        Write-Host "tex-annotator removed. (Its logs and deleted-file backups are in $env:USERPROFILE\.cache\tex-annotator if you want those gone too.)"
+        Write-Host "latex-copilot removed. (Its logs and deleted-file backups are in $env:USERPROFILE\.cache\latex-copilot if you want those gone too.)"
         return
     }
 
-    Bold "tex-annotator installer (Windows)"
+    Bold "Latex-Copilot installer (Windows)"
     Refresh-Path
 
     # ------------------------------------------------------------------ the app's files
     $Src = $null
-    if ($env:TEX_ANNOTATOR_SOURCE -and (Test-Path (Join-Path $env:TEX_ANNOTATOR_SOURCE "tex_annotator\app.py"))) {
-        $Src = (Resolve-Path $env:TEX_ANNOTATOR_SOURCE).Path
-    } elseif ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "tex_annotator\app.py"))) {
+    if ($env:LATEX_COPILOT_SOURCE -and (Test-Path (Join-Path $env:LATEX_COPILOT_SOURCE "latex_copilot\app.py"))) {
+        $Src = (Resolve-Path $env:LATEX_COPILOT_SOURCE).Path
+    } elseif ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "latex_copilot\app.py"))) {
         $Src = $PSScriptRoot
     } else {
-        $url = if ($env:TEX_ANNOTATOR_SOURCE) { $env:TEX_ANNOTATOR_SOURCE } else { "https://github.com/$Repo/archive/$Ref.zip" }
-        Bold "Downloading tex-annotator..."
-        $tmp = Join-Path ([IO.Path]::GetTempPath()) ("tex-annotator-" + [guid]::NewGuid().ToString("N"))
+        $url = if ($env:LATEX_COPILOT_SOURCE) { $env:LATEX_COPILOT_SOURCE } else { "https://github.com/$Repo/archive/$Ref.zip" }
+        Bold "Downloading Latex-Copilot..."
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) ("latex-copilot-" + [guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory -Path $tmp | Out-Null
         try {
             Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile (Join-Path $tmp "source.zip")
@@ -179,14 +185,14 @@
             throw "Couldn't download $url. Check your internet connection. (If the repository is private: git clone it, then double-click install.cmd in that folder.)"
         }
         Expand-Archive -Path (Join-Path $tmp "source.zip") -DestinationPath $tmp
-        $Src = Get-ChildItem $tmp -Directory | Where-Object { Test-Path (Join-Path $_.FullName "tex_annotator\app.py") } |
+        $Src = Get-ChildItem $tmp -Directory | Where-Object { Test-Path (Join-Path $_.FullName "latex_copilot\app.py") } |
                Select-Object -First 1 -ExpandProperty FullName
         if (-not $Src) { throw "The download doesn't contain the app." }
     }
 
     # ------------------------------------------------------------------ what it needs
     if (-not $SkipPrereqs) {
-        Bold "Checking what tex-annotator needs..."
+        Bold "Checking what Latex-Copilot needs..."
         if (-not (Find-Python)) {
             if (Ask "Python 3.10 or newer is needed. Install Python 3.12 with winget?") { Winget-Install "Python.Python.3.12" "Python" }
         }
@@ -205,11 +211,29 @@
         if (-not (Ghostscript-Found)) {
             if (Ask "Install Ghostscript (needed to import PDFs) from ghostscript.com?") { Install-Ghostscript }
         }
-        if (-not (Claude-Found) -and $env:TEX_ANNOTATOR_NO_CLAUDE -ne "1") {
-            Say "Claude Code is what does the work in tex-annotator; it uses your own Claude account."
+        if (-not (Claude-Found) -and $env:LATEX_COPILOT_NO_CLAUDE -ne "1") {
+            Say "Claude Code is what does the work in Latex-Copilot; it uses your own Claude account."
             if (Ask "Install Claude Code with Anthropic's official installer?") {
                 & powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://claude.ai/install.ps1 | iex"
                 Add-UserPath $ClaudeBin           # the official installer doesn't add it to PATH itself
+            }
+        }
+    }
+
+    # ------------------------------------------------------------------ sign in to Claude
+    # Now, while there's a console (Latex-Copilot can also do it later from its chat panel).
+    $claudeExe = $null
+    $found = Get-Command claude -ErrorAction SilentlyContinue
+    if ($found) { $claudeExe = $found.Source } elseif (Test-Path (Join-Path $ClaudeBin "claude.exe")) { $claudeExe = Join-Path $ClaudeBin "claude.exe" }
+    if ($claudeExe -and $env:CI -ne "true") {
+        $code, $out = Run-Quiet $claudeExe @("auth", "status")
+        if ($code -ne 0) {
+            Say "Latex-Copilot uses your Claude account (Pro, Max, Team or Enterprise)."
+            if (Ask "Sign in to Claude now? It opens your browser.") {
+                $saved = $ErrorActionPreference
+                $ErrorActionPreference = "Continue"
+                & $claudeExe auth login
+                $ErrorActionPreference = $saved
             }
         }
     }
@@ -220,11 +244,11 @@
     }
 
     # ------------------------------------------------------------------ the app
-    Bold "Installing tex-annotator..."
+    Bold "Installing Latex-Copilot..."
     $new = "$AppDir.new"
     if (Test-Path $new) { Remove-Item -Recurse -Force $new }
     New-Item -ItemType Directory -Path $new | Out-Null
-    Copy-Item -Recurse (Join-Path $Src "tex_annotator") $new
+    Copy-Item -Recurse (Join-Path $Src "latex_copilot") $new
     foreach ($f in @("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "install.ps1", "install.cmd")) {
         $p = Join-Path $Src $f
         if (Test-Path $p) { Copy-Item $p $new }
@@ -241,13 +265,20 @@
     }
     $lines = @(
         "@echo off",
-        "rem tex-annotator launcher (created by install.ps1)",
+        "rem Latex-Copilot launcher (created by install.ps1)",
         "setlocal",
-        'set "PYTHONPATH=%LOCALAPPDATA%\tex-annotator\app;%PYTHONPATH%"',
-        "$run -X utf8 -m tex_annotator %*"
+        'set "PYTHONPATH=%LOCALAPPDATA%\latex-copilot\app;%PYTHONPATH%"',
+        "$run -X utf8 -m latex_copilot %*"
     )
     Set-Content -Path $Launcher -Value $lines -Encoding ASCII
     Add-UserPath $BinDir
+    # Latex-Copilot used to be called tex-annotator: remove that version (its logs and deleted-file backups stay).
+    $old = Join-Path $env:LOCALAPPDATA "tex-annotator"
+    if (Test-Path $old) {
+        Remove-Item -Recurse -Force $old
+        Remove-UserPath (Join-Path $old "bin")
+        Say "Removed the previous version (tex-annotator)."
+    }
     Say "app:     $AppDir"
     Say "command: $Launcher  (using $($py.Exe))"
     Write-Host ""
@@ -259,12 +290,12 @@
     $checked = ($LASTEXITCODE -eq 0)
     $ErrorActionPreference = $saved
     Write-Host ""
-    Bold "Done. Open a new terminal (so it finds the tex-annotator command), then run:"
+    Bold "Done. Open a new terminal (so it finds the latex-copilot command), then run:"
     Say "cd path\to\your\latex\project"
-    Say "tex-annotator"
-    Say "or, to rebuild a PDF as LaTeX:  tex-annotator path\to\file.pdf"
+    Say "latex-copilot"
+    Say "or, to rebuild a PDF as LaTeX:  latex-copilot path\to\file.pdf"
     if (-not $checked) {
         Say "Something above is still missing. Run this installer again, or install it yourself (see the README)."
-        Say "If Claude Code is new here, run 'claude' once in a new terminal and sign in."
+        Say "Not signed in to Claude yet? Latex-Copilot's chat panel has a Sign in button."
     }
 } @args

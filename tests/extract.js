@@ -2,7 +2,7 @@
 // PDF analysis:  node tests/extract.js input.pdf output.json
 const fs = require("fs");
 const path = require("path");
-const STATIC = path.join(__dirname, "..", "tex_annotator", "static");
+const STATIC = path.join(__dirname, "..", "latex_copilot", "static");
 const pdfjsLib = require(path.join(STATIC, "vendor", "pdf.min.js"));
 pdfjsLib.GlobalWorkerOptions.workerSrc = path.join(STATIC, "vendor", "pdf.worker.min.js");
 const { extractPdfText } = require(path.join(STATIC, "pdf-extract.js"));

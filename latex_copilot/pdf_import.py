@@ -17,7 +17,7 @@ and writes into the project folder:
 Coordinates are PDF points (bp, 1/72 inch). Internally y points UP from the bottom of the page, as in PDF
 and TikZ. Only the Python standard library is used, plus the `gs` (Ghostscript) command.
 
-For testing:  python3 -m tex_annotator.pdf_import original.pdf text.json out-folder
+For testing:  python3 -m latex_copilot.pdf_import original.pdf text.json out-folder
 (text.json is what static/pdf-extract.js returns.)
 """
 
@@ -1584,7 +1584,7 @@ def analyse(pdf: Path, text: dict, root: Path, progress=lambda msg: None, source
     else:   # fall back to Ghostscript's render-time filter (it misses text on pages with transparency)
         notext_src, filt = pdf, True
 
-    with tempfile.TemporaryDirectory(prefix="texann-import-") as td:
+    with tempfile.TemporaryDirectory(prefix="latex-copilot-import-") as td:
         tmp = Path(td)
         # Render in batches: page images, text colours, whether text is visible, and the regions of ink.
         for first in range(1, total + 1, BATCH):
@@ -2070,7 +2070,7 @@ def write_page(pg: Page, out: list, sid, total: int):
 
 if __name__ == "__main__":
     if len(sys.argv) != 4:
-        sys.exit("usage: python3 -m tex_annotator.pdf_import original.pdf text.json out-folder")
+        sys.exit("usage: python3 -m latex_copilot.pdf_import original.pdf text.json out-folder")
     src, js, outdir = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
     outdir.mkdir(parents=True, exist_ok=True)
     res = analyse(src, json.loads(js.read_text()), outdir, progress=print, source_name=src.name)

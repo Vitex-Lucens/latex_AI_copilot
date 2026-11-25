@@ -1,4 +1,4 @@
-# Installs tex-annotator on Windows, macOS and Ubuntu the way users do, then runs tests/smoke_test.py
+# Installs latex-copilot on Windows, macOS and Ubuntu the way users do, then runs tests/smoke_test.py
 # (compiling, SyncTeX, PDF import, the server). Claude Code isn't installed here.
 name: Tests
 
@@ -30,8 +30,8 @@ jobs:
       - name: install.sh (Ubuntu, with prerequisites)
         if: runner.os == 'Linux'
         env:
-          TEX_ANNOTATOR_YES: "1"
-          TEX_ANNOTATOR_NO_CLAUDE: "1"
+          LATEX_COPILOT_YES: "1"
+          LATEX_COPILOT_NO_CLAUDE: "1"
         run: ./install.sh
 
       # ---- macOS: BasicTeX instead of MacTeX (5 GB is too slow for CI), then install.sh for the app
@@ -47,7 +47,7 @@ jobs:
       - name: install.sh (macOS)
         if: runner.os == 'macOS'
         env:
-          TEX_ANNOTATOR_SKIP_PREREQS: "1"
+          LATEX_COPILOT_SKIP_PREREQS: "1"
         run: ./install.sh
 
       # ---- Windows: install.ps1 first (it doesn't need TeX), then the same TeX set-up install.ps1 makes for
@@ -57,31 +57,31 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         env:
-          TEX_ANNOTATOR_SKIP_PREREQS: "1"
+          LATEX_COPILOT_SKIP_PREREQS: "1"
         # an error in install.ps1 still fails the step; `exit 0` only drops the exit code of its final
-        # `tex-annotator --check`, which reports Claude Code missing here
+        # `latex-copilot --check`, which reports Claude Code missing here
         run: |
           try { .\install.ps1 } catch { Write-Host ("::error title=install.ps1::" + ("$_`n" + $_.ScriptStackTrace).Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")); exit 1 }
           exit 0
 
-      - name: tex-annotator --version (Windows)
+      - name: latex-copilot --version (Windows)
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-          $out = & "$env:LOCALAPPDATA\tex-annotator\bin\tex-annotator.cmd" --version
+          $out = & "$env:LOCALAPPDATA\latex-copilot\bin\latex-copilot.cmd" --version
           Write-Host $out
-          if ($LASTEXITCODE -ne 0 -or "$out" -notmatch "tex-annotator \d") {
-            Write-Host "::error title=Windows launcher::tex-annotator --version failed: $out"
+          if ($LASTEXITCODE -ne 0 -or "$out" -notmatch "latex-copilot \d") {
+            Write-Host "::error title=Windows launcher::latex-copilot --version failed: $out"
             exit 1
           }
-          & "$env:LOCALAPPDATA\tex-annotator\bin\tex-annotator.cmd" --check
+          & "$env:LOCALAPPDATA\latex-copilot\bin\latex-copilot.cmd" --check
           exit 0   # --check reports Claude Code missing on CI
       - name: one-line install (Windows PowerShell 5.1)
         if: runner.os == 'Windows' && github.event_name == 'push'
         shell: powershell
         env:
-          TEX_ANNOTATOR_REF: ${{ github.sha }}
-          TEX_ANNOTATOR_SKIP_PREREQS: "1"
+          LATEX_COPILOT_REF: ${{ github.sha }}
+          LATEX_COPILOT_SKIP_PREREQS: "1"
         run: |
           try { irm "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.ps1" | iex } catch { Write-Host ("::error title=one-line install.ps1::" + ("$_`n" + $_.ScriptStackTrace).Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")); exit 1 }
           exit 0
@@ -125,17 +125,17 @@ jobs:
           Step "miktex update-package-database" { miktex --admin packages update-package-database }
           Step "latexmk --version" { latexmk --version }
       # ---- the installed command works
-      - name: tex-annotator --version (macOS, Ubuntu)
+      - name: latex-copilot --version (macOS, Ubuntu)
         if: runner.os != 'Windows'
         run: |
-          "$HOME/.local/bin/tex-annotator" --version | grep -E "^tex-annotator [0-9]"
-          "$HOME/.local/bin/tex-annotator" --check || true   # reports Claude Code missing on CI
+          "$HOME/.local/bin/latex-copilot" --version | grep -E "^latex-copilot [0-9]"
+          "$HOME/.local/bin/latex-copilot" --check || true   # reports Claude Code missing on CI
       # ---- the one-line installs, exactly as in the README (this commit, downloaded from GitHub)
       - name: one-line install (macOS, Ubuntu)
         if: runner.os != 'Windows' && github.event_name == 'push'
         env:
-          TEX_ANNOTATOR_REF: ${{ github.sha }}
-          TEX_ANNOTATOR_SKIP_PREREQS: "1"
+          LATEX_COPILOT_REF: ${{ github.sha }}
+          LATEX_COPILOT_SKIP_PREREQS: "1"
         run: curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.sh" | bash
       - name: Smoke test
         run: python tests/smoke_test.py

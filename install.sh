@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
-# tex-annotator installer for macOS and Linux (Ubuntu/Debian, other distributions, and WSL on Windows).
+# Latex-Copilot installer for macOS and Linux (Ubuntu/Debian, other distributions, and WSL on Windows).
 #
 #   curl -fsSL https://raw.githubusercontent.com/Vitex-Lucens/latex_AI_copilot/main/install.sh | bash
 #   ./install.sh               from a copy of the repository (git clone or zip)
 #   ./install.sh --uninstall   remove the app (TeX, Ghostscript and Claude Code stay installed)
 #
 # It installs whatever is missing (Python 3.10+, TeX with latexmk, Ghostscript, Claude Code), asking
-# before each step, then the app itself: into ~/.local/share/tex-annotator, with a `tex-annotator`
+# before each step, then the app itself: into ~/.local/share/latex-copilot, with a `latex-copilot`
 # command in ~/.local/bin. Run it again at any time to update. The app needs no admin rights; installing
 # TeX and the other tools asks for your password.
 #
 # Settings (environment variables):
-#   TEX_ANNOTATOR_YES=1            answer yes to every question
-#   TEX_ANNOTATOR_SKIP_PREREQS=1   install only the app
-#   TEX_ANNOTATOR_NO_CLAUDE=1      don't offer to install Claude Code
-#   TEX_ANNOTATOR_REF=<branch|tag> the version to download (default: main)
-#   TEX_ANNOTATOR_SOURCE=<folder or .tar.gz URL>   install from there instead of GitHub
+#   LATEX_COPILOT_YES=1            answer yes to every question
+#   LATEX_COPILOT_SKIP_PREREQS=1   install only the app
+#   LATEX_COPILOT_NO_CLAUDE=1      don't offer to install Claude Code
+#   LATEX_COPILOT_REF=<branch|tag> the version to download (default: main)
+#   LATEX_COPILOT_SOURCE=<folder or .tar.gz URL>   install from there instead of GitHub
 set -euo pipefail
 
 REPO="Vitex-Lucens/latex_AI_copilot"
-REF="${TEX_ANNOTATOR_REF:-main}"
-PREFIX="${TEX_ANNOTATOR_HOME:-$HOME/.local/share/tex-annotator}"
-BIN_DIR="${TEX_ANNOTATOR_BIN:-$HOME/.local/bin}"
-LAUNCHER="$BIN_DIR/tex-annotator"
+REF="${LATEX_COPILOT_REF:-main}"
+PREFIX="${LATEX_COPILOT_HOME:-$HOME/.local/share/latex-copilot}"
+BIN_DIR="${LATEX_COPILOT_BIN:-$HOME/.local/bin}"
+LAUNCHER="$BIN_DIR/latex-copilot"
 ORIG_PATH="$PATH"
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
@@ -34,9 +34,9 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # Questions go to the terminal, so they also work when this script is piped into bash.
 can_ask() { (true </dev/tty) 2>/dev/null; }
 ask() {
-  [ "${TEX_ANNOTATOR_YES:-}" = 1 ] && return 0
+  [ "${LATEX_COPILOT_YES:-}" = 1 ] && return 0
   if ! can_ask; then
-    note "(No terminal to ask in, so skipping this. Set TEX_ANNOTATOR_YES=1 to install without asking.)"
+    note "(No terminal to ask in, so skipping this. Set LATEX_COPILOT_YES=1 to install without asking.)"
     return 1
   fi
   local answer=""
@@ -48,7 +48,7 @@ ask() {
 if [ "${1:-}" = "--uninstall" ]; then
   rm -rf "$PREFIX"
   rm -f "$LAUNCHER"
-  echo "tex-annotator removed. (Its logs and deleted-file backups are in ~/.cache/tex-annotator if you want those gone too.)"
+  echo "latex-copilot removed. (Its logs and deleted-file backups are in ~/.cache/latex-copilot if you want those gone too.)"
   exit 0
 fi
 
@@ -62,24 +62,24 @@ if [ "$PLATFORM" = linux ] && grep -qi microsoft /proc/version 2>/dev/null; then
 if [ "$PLATFORM" = mac ] && [ -d /Library/TeX/texbin ]; then export PATH="/Library/TeX/texbin:$PATH"; fi
 export PATH="$BIN_DIR:$HOME/.local/bin:$PATH"
 
-if [ "$PLATFORM" = mac ]; then bold "tex-annotator installer (macOS)"; else bold "tex-annotator installer (Linux${WSL:+ on WSL})"; fi
+if [ "$PLATFORM" = mac ]; then bold "Latex-Copilot installer (macOS)"; else bold "Latex-Copilot installer (Linux${WSL:+ on WSL})"; fi
 
 # ------------------------------------------------------------------------- the app's files
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 HERE=""
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; fi
-if [ -n "${TEX_ANNOTATOR_SOURCE:-}" ] && [ -d "$TEX_ANNOTATOR_SOURCE" ]; then
-  SRC="$(cd "$TEX_ANNOTATOR_SOURCE" && pwd)"
-elif [ -n "$HERE" ] && [ -f "$HERE/tex_annotator/app.py" ]; then
+if [ -n "${LATEX_COPILOT_SOURCE:-}" ] && [ -d "$LATEX_COPILOT_SOURCE" ]; then
+  SRC="$(cd "$LATEX_COPILOT_SOURCE" && pwd)"
+elif [ -n "$HERE" ] && [ -f "$HERE/latex_copilot/app.py" ]; then
   SRC="$HERE"
 else
-  URL="${TEX_ANNOTATOR_SOURCE:-https://github.com/$REPO/archive/$REF.tar.gz}"
-  bold "Downloading tex-annotator…"
+  URL="${LATEX_COPILOT_SOURCE:-https://github.com/$REPO/archive/$REF.tar.gz}"
+  bold "Downloading Latex-Copilot…"
   if ! curl -fsSL "$URL" | tar -xz -C "$TMP"; then
     fail "Couldn't download $URL. Check your internet connection. (If the repository is private: git clone git@github.com:$REPO.git, then run ./install.sh in that folder.)"
   fi
-  APP="$(find "$TMP" -path '*/tex_annotator/app.py' | head -n 1)"
+  APP="$(find "$TMP" -path '*/latex_copilot/app.py' | head -n 1)"
   [ -n "$APP" ] || fail "The download doesn't contain the app."
   SRC="$(dirname "$(dirname "$APP")")"
 fi
@@ -107,7 +107,7 @@ ensure_brew() {
     if [ -x "$b" ]; then eval "$("$b" shellenv)"; return 0; fi
   done
   ask "Homebrew (the macOS package manager) is needed to install the rest. Install it now? It asks for your password." || return 1
-  NONINTERACTIVE="${TEX_ANNOTATOR_YES:+1}" /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  NONINTERACTIVE="${LATEX_COPILOT_YES:+1}" /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
   for b in /opt/homebrew/bin/brew /usr/local/bin/brew; do
     if [ -x "$b" ]; then eval "$("$b" shellenv)"; return 0; fi
   done
@@ -162,27 +162,40 @@ prereqs_linux() {
 }
 
 prereq_claude() {
-  if have claude || [ -x "$HOME/.local/bin/claude" ] || [ "${TEX_ANNOTATOR_NO_CLAUDE:-}" = 1 ]; then return 0; fi
-  note "Claude Code is what does the work in tex-annotator; it uses your own Claude account."
+  if have claude || [ -x "$HOME/.local/bin/claude" ] || [ "${LATEX_COPILOT_NO_CLAUDE:-}" = 1 ]; then return 0; fi
+  note "Claude Code is what does the work in Latex-Copilot; it uses your own Claude account."
   if ask "Install Claude Code with Anthropic's official installer?"; then
     curl -fsSL https://claude.ai/install.sh | bash
   fi
 }
 
-if [ "${TEX_ANNOTATOR_SKIP_PREREQS:-}" != 1 ]; then
-  bold "Checking what tex-annotator needs…"
+# Sign in to Claude now, while there's a terminal (Latex-Copilot can also do it later from its chat panel).
+claude_signin() {
+  local c=""
+  if have claude; then c="claude"; elif [ -x "$HOME/.local/bin/claude" ]; then c="$HOME/.local/bin/claude"; else return 0; fi
+  "$c" auth status >/dev/null 2>&1 && return 0
+  if [ "${CI:-}" = true ] || ! can_ask; then return 0; fi
+  note "Latex-Copilot uses your Claude account (Pro, Max, Team or Enterprise)."
+  if ask "Sign in to Claude now? It opens your browser."; then
+    "$c" auth login </dev/tty || warn "Sign-in didn't finish. You can sign in later from Latex-Copilot's chat panel."
+  fi
+}
+
+if [ "${LATEX_COPILOT_SKIP_PREREQS:-}" != 1 ]; then
+  bold "Checking what Latex-Copilot needs…"
   if [ "$PLATFORM" = mac ]; then prereqs_mac; else prereqs_linux; fi
   prereq_claude
 fi
+claude_signin
 find_python || true
 [ -n "$PY" ] || fail "Python 3.10 or newer is needed. macOS: brew install python · Ubuntu/Debian: sudo apt install python3 (on Ubuntu 20.04, python3.10 from the deadsnakes PPA)."
 
 # ------------------------------------------------------------------------- the app
-bold "Installing tex-annotator…"
+bold "Installing Latex-Copilot…"
 mkdir -p "$BIN_DIR"
 rm -rf "$PREFIX.new"
 mkdir -p "$PREFIX.new"
-cp -R "$SRC/tex_annotator" "$PREFIX.new/"
+cp -R "$SRC/latex_copilot" "$PREFIX.new/"
 for f in README.md LICENSE THIRD_PARTY_NOTICES.md install.sh; do
   if [ -f "$SRC/$f" ]; then cp "$SRC/$f" "$PREFIX.new/"; fi
 done
@@ -192,10 +205,16 @@ mv "$PREFIX.new" "$PREFIX"
 
 cat > "$LAUNCHER" <<EOF
 #!/bin/sh
-# tex-annotator launcher (created by install.sh)
-PYTHONPATH="$PREFIX\${PYTHONPATH:+:\$PYTHONPATH}" exec "$PY" -X utf8 -m tex_annotator "\$@"
+# Latex-Copilot launcher (created by install.sh)
+PYTHONPATH="$PREFIX\${PYTHONPATH:+:\$PYTHONPATH}" exec "$PY" -X utf8 -m latex_copilot "\$@"
 EOF
 chmod +x "$LAUNCHER"
+# Latex-Copilot used to be called tex-annotator: remove that version (its logs and deleted-file backups stay).
+if [ -d "$HOME/.local/share/tex-annotator" ] || [ -f "$BIN_DIR/tex-annotator" ]; then
+  rm -rf "$HOME/.local/share/tex-annotator"
+  rm -f "$BIN_DIR/tex-annotator"
+  note "Removed the previous version (tex-annotator). Its logs and deleted-file backups are still in ~/.cache/tex-annotator."
+fi
 note "app:     $PREFIX"
 note "command: $LAUNCHER  (using $PY)"
 echo
@@ -211,9 +230,9 @@ case ":$ORIG_PATH:" in
         *) RC="$HOME/.profile" ;;
       esac
       LINE="export PATH=\"$BIN_DIR:\$PATH\""
-      if ask "Add $BIN_DIR to your PATH in $RC, so the tex-annotator command works in new terminals?"; then
-        printf '\n# Added by the tex-annotator installer\n%s\n' "$LINE" >> "$RC"
-        note "Added. Open a new terminal before using tex-annotator."
+      if ask "Add $BIN_DIR to your PATH in $RC, so the latex-copilot command works in new terminals?"; then
+        printf '\n# Added by the Latex-Copilot installer\n%s\n' "$LINE" >> "$RC"
+        note "Added. Open a new terminal before using Latex-Copilot."
       else
         note "Add this line to $RC yourself: $LINE"
       fi
@@ -227,9 +246,9 @@ CHECK=0
 "$LAUNCHER" --check || CHECK=$?
 echo
 bold "Done. To start, open a new terminal and run:"
-note "cd path/to/your/latex/project && tex-annotator"
-note "or, to rebuild a PDF as LaTeX:   tex-annotator path/to/file.pdf"
+note "cd path/to/your/latex/project && latex-copilot"
+note "or, to rebuild a PDF as LaTeX:   latex-copilot path/to/file.pdf"
 if [ "$CHECK" != 0 ]; then
   note "Something above is still missing. Run this installer again, or install it yourself (see the README)."
-  note "If Claude Code is new here, run \`claude\` once and sign in."
+  note "Not signed in to Claude yet? Latex-Copilot's chat panel has a Sign in button."
 fi

@@ -1,6 +1,6 @@
 # Third-party software
 
-tex-annotator bundles these libraries, unmodified, in `tex_annotator/static/vendor/`:
+Latex-Copilot bundles these libraries, unmodified, in `latex_copilot/static/vendor/`:
 
 | Library | Version | License | Files |
 |---|---|---|---|

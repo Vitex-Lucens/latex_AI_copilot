@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-tex-annotator: an Overleaf-style local LaTeX editor for a project folder.
+Latex-Copilot: an Overleaf-style local LaTeX editor for a project folder.
 Edit the source next to the compiled PDF, chat with Claude, and annotate the
 PDF (pencil + comments); Claude Code edits the source and the PDF recompiles.
 
 Usage:
-    tex-annotator                       # the LaTeX project in the current folder (or an empty folder)
-    tex-annotator path/to/project       # main .tex file detected automatically
-    tex-annotator path/to/main.tex      # project = that file's folder
-    tex-annotator path/to/file.pdf      # rebuild a PDF as LaTeX, in a new folder next to it
-    tex-annotator --check               # check that everything it needs is installed
+    latex-copilot                       # the LaTeX project in the current folder (or an empty folder)
+    latex-copilot path/to/project       # main .tex file detected automatically
+    latex-copilot path/to/main.tex      # project = that file's folder
+    latex-copilot path/to/file.pdf      # rebuild a PDF as LaTeX, in a new folder next to it
+    latex-copilot --check               # check that everything it needs is installed
 
 Requires: latexmk, synctex (TeX Live), and the `claude` CLI (signed in). Importing PDFs also needs Ghostscript.
-Only the Python standard library is used. Server log: ~/.cache/tex-annotator/server.log
+Only the Python standard library is used. Server log: ~/.cache/latex-copilot/server.log
 """
 
 import argparse
@@ -20,11 +20,13 @@ import atexit
 import base64
 import difflib
 import hashlib
+import hmac
 import json
 import mimetypes
 import os
 import platform
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -35,6 +37,7 @@ import time
 import traceback
 import webbrowser
 from collections import defaultdict
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -49,8 +52,10 @@ except ImportError:  # run as a plain script
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 PROMPTS = HERE / "prompts"
-CACHE = Path.home() / ".cache" / "tex-annotator"
+CACHE = Path.home() / ".cache" / "latex-copilot"
 LOG_PATH = CACHE / "server.log"
+COOKIE = "latex_copilot"          # holds the access key in the browser
+TOKEN = ""                        # this user's access key, set in main()
 TRASH = CACHE / "trash"
 
 # Files the editor (and Claude's undo tracking) treat as editable text.
@@ -70,6 +75,25 @@ MAX_JSON = 120 * 1024 * 1024       # requests with JSON bodies (an imported PDF'
 # --------------------------------------------------------------------------- #
 # Logging (so a crash or kill leaves evidence)
 # --------------------------------------------------------------------------- #
+
+def load_token() -> str:
+    """This user's access key for the local server: random, kept in a file only this user can read."""
+    path = CACHE / "access-key"
+    try:
+        key = path.read_text(encoding="utf-8").strip()
+        if len(key) >= 24:
+            return key
+    except OSError:
+        pass
+    key = secrets.token_urlsafe(24)
+    CACHE.mkdir(parents=True, exist_ok=True)
+    path.write_text(key, encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return key
+
 
 def slog(msg: str):
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} [pid {os.getpid()}] {msg}"
@@ -130,6 +154,7 @@ class State:
         self.cancelled = False
         self.undo: dict[str, str | None] | None = None  # abs path -> content before Claude's last edit (None = created)
         self.progress = ""                 # what a long job (PDF import) is doing right now, shown while it runs
+        self.trust_rc = False              # run the project's latexmkrc (it's Perl code): only with --latexmkrc
 
     @property
     def pdf(self) -> Path:
@@ -265,9 +290,16 @@ def compile_tex() -> dict:
         "latexmk", engine_flag, "-synctex=1", "-interaction=nonstopmode",
         "-halt-on-error", "-file-line-error", S.tex.name,
     ]
+    if not S.trust_rc:
+        # A latexmkrc file is Perl code that latexmk runs. One in the project (from a shared project, or written
+        # by Claude after reading a booby-trapped document) could run anything, so it's ignored unless trusted.
+        cmd.insert(1, "-norc")
+    # TeX Live: LaTeX may only read and write files in the project (and its own installation), so a document
+    # can't pull other files from the computer (e.g. \input{~/.ssh/...}) into the PDF.
+    env = dict(os.environ, openin_any="p", openout_any="p")
     with S.compile_lock:
         proc = subprocess.run(cmd, cwd=S.tex.parent, capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", stdin=subprocess.DEVNULL)
+                              errors="replace", stdin=subprocess.DEVNULL, env=env)
     ok = proc.returncode == 0
     errors = "" if ok else extract_errors(proc.stdout + "\n" + proc.stderr)
     S.last_compile = {"ok": ok, "errors": errors, "time": time.time()}
@@ -447,7 +479,7 @@ def log(msg: str, kind: str = "info", **extra):
         S.transcript.append({"t": time.time(), "kind": kind, "msg": msg, **extra})
 
 
-SYSTEM_PROMPT = """You are working inside tex-annotator, a local Overleaf-style LaTeX editor. The current directory \
+SYSTEM_PROMPT = """You are working inside Latex-Copilot, a local Overleaf-style LaTeX editor. The current directory \
 is a LaTeX project; its main document is `{main}`. The user sees the LaTeX source side by side with the compiled PDF \
 and talks to you through a chat panel. They can also draw on the PDF and pin comments to it. Annotations arrive with \
 the PDF text they cover, SyncTeX source line numbers and a line-numbered source excerpt; pencil marks also come with a \
@@ -577,10 +609,10 @@ def run_claude(prompt: str, extra_dirs: list[str], resume: str | None = None,
                system: str | None = None) -> tuple[bool, str, str | None]:
     claude = claude_command()
     if not claude:
-        return False, "Claude Code isn't installed (the `claude` command wasn't found). Run `tex-annotator --check`.", None
+        return False, "Claude Code isn't installed (the `claude` command wasn't found). Run `latex-copilot --check`.", None
     # The prompt goes in on stdin and the system prompt in a file, so neither passes through the command line
     # (length limits, and quoting on Windows).
-    fd, sys_path = tempfile.mkstemp(prefix="texann-system-", suffix=".md")
+    fd, sys_path = tempfile.mkstemp(prefix="latex-copilot-system-", suffix=".md")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(system or system_prompt())
     cmd = [
@@ -681,14 +713,95 @@ def run_claude(prompt: str, extra_dirs: list[str], resume: str | None = None,
     slog(f"claude exited rc={proc.returncode}")
     if S.cancelled:
         return False, "Stopped.", session_id
+    if not ok and AUTH_TROUBLE.search(result_text + "".join(stderr_buf)) and not claude_status(force=True).get("signedIn"):
+        return False, "Claude isn't signed in. Use Sign in to Claude at the top of the chat, then send again.", session_id
     if proc.returncode != 0 and not result_text:
         err = "".join(stderr_buf)[-2000:]
         return False, f"claude exited with code {proc.returncode}\n{err}".strip(), session_id
     return ok, result_text, session_id
 
 
+# --------------------------------------------------------------------------- #
+# Claude connection: is Claude Code installed and signed in, and signing in from the page
+# --------------------------------------------------------------------------- #
+
+CLAUDE = {"checked": 0.0, "data": None}
+LOGIN = {"proc": None, "output": "", "state": "idle"}
+ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07")
+AUTH_TROUBLE = re.compile(r"/login|not logged in|log in|sign in|authenticat|invalid api key|oauth|credential", re.I)
+
+
+def claude_status(force=False) -> dict:
+    """{installed, signedIn, method, account, os}. Cached for half a minute: `claude auth status` takes a moment."""
+    if not force and CLAUDE["data"] and time.time() - CLAUDE["checked"] < 30:
+        return CLAUDE["data"]
+    cmd = claude_command()
+    data = {"installed": bool(cmd), "signedIn": False, "method": "", "account": "",
+            "os": "win" if os.name == "nt" else "mac" if sys.platform == "darwin" else "linux"}
+    if cmd:
+        try:
+            p = subprocess.run([*cmd, "auth", "status"], capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=30, stdin=subprocess.DEVNULL)
+            data["signedIn"] = p.returncode == 0               # documented: 0 = signed in, 1 = not
+            try:
+                info = json.loads(p.stdout[p.stdout.index("{"):])
+                data["method"] = info.get("authMethod") or ""
+                # not documented, so only shown when present
+                data["account"] = " · ".join(str(x) for x in (info.get("email"), info.get("subscriptionType")) if x)
+            except ValueError:
+                pass
+        except (OSError, subprocess.SubprocessError):
+            data["signedIn"] = None
+    CLAUDE.update(checked=time.time(), data=data)
+    return data
+
+
+def login_view() -> dict:
+    text = ANSI.sub("", LOGIN["output"])
+    urls = re.findall(r"https://[^\s'\"<>]+", text)
+    return {"state": LOGIN["state"], "output": text[-3000:], "url": urls[-1] if urls else ""}
+
+
+def start_login(console=False) -> str | None:
+    """Run `claude auth login` in the background. It opens the browser and usually finishes by itself; if the
+    browser shows a code instead, the page sends it here (the command reads it from standard input)."""
+    proc = LOGIN["proc"]
+    if proc and proc.poll() is None:
+        return None
+    cmd = claude_command()
+    if not cmd:
+        return "Claude Code isn't installed."
+    env = dict(os.environ)
+    if in_wsl() and not env.get("BROWSER") and shutil.which("wslview"):
+        env["BROWSER"] = "wslview"                           # open the Windows browser from WSL
+    detach = ({"start_new_session": True} if os.name == "posix"
+              else {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)})
+    try:
+        proc = subprocess.Popen([*cmd, "auth", "login"] + (["--console"] if console else []), stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                                errors="replace", cwd=str(Path.home()), env=env, **detach)
+    except OSError as e:
+        return f"Couldn't start the sign-in: {e}"
+    LOGIN.update(proc=proc, output="", state="running", cancelled=False)
+    slog("claude sign-in started")
+
+    def read():
+        while True:
+            chunk = proc.stdout.read(1)                      # prompts don't end with a newline
+            if not chunk:
+                break
+            LOGIN["output"] = (LOGIN["output"] + chunk)[-20000:]
+        proc.wait()
+        st = claude_status(force=True)
+        LOGIN["state"] = "idle" if LOGIN.get("cancelled") else "done" if st.get("signedIn") else "failed"
+        slog(f"claude sign-in ended: {LOGIN['state']}")
+    threading.Thread(target=read, daemon=True).start()
+    threading.Timer(600, lambda: proc.poll() is None and kill_tree(proc)).start()   # give up after 10 minutes
+    return None
+
+
 def chat_worker(payload: dict):
-    imgdir = Path(tempfile.mkdtemp(prefix="tex-annotator-"))
+    imgdir = Path(tempfile.mkdtemp(prefix="latex-copilot-"))
     try:
         images: dict[int, Path] = {}
         for a in (payload.get("annotations") or {}).get("areas", []):
@@ -765,8 +878,8 @@ def describe_attachments(payload: dict) -> str:
 # PDF import: take the PDF apart (pdf_import.py), then Claude rebuilds it as LaTeX, a few pages at a time
 # --------------------------------------------------------------------------- #
 
-PART_WORDS = int(os.environ.get("TEX_ANNOTATOR_PART_WORDS", 2600))   # a part is about this many words…
-PART_PAGES = int(os.environ.get("TEX_ANNOTATOR_PART_PAGES", 8))       # …and at most this many pages
+PART_WORDS = int(os.environ.get("LATEX_COPILOT_PART_WORDS", 2600))   # a part is about this many words…
+PART_PAGES = int(os.environ.get("LATEX_COPILOT_PART_PAGES", 8))       # …and at most this many pages
 CHECK_PAGES = 12    # most compiled pages shown to Claude when it checks a part against the original
 
 
@@ -1069,26 +1182,36 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quieter console
         pass
 
+    def security_headers(self):
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+
     def send_json(self, obj, code=200):
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.security_headers()
         self.end_headers()
         self.wfile.write(body)
 
-    def send_file(self, path: Path, ctype: str | None = None):
+    def send_file(self, path: Path, ctype: str | None = None, project_file=False):
         if not path.exists() or not path.is_file():
             self.send_error(404)
             return
         data = path.read_bytes()
+        ctype = ctype or mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        if project_file and re.search(r"html|xml|javascript|ecmascript", ctype) and "svg" not in ctype:
+            ctype = "text/plain; charset=utf-8"     # never run a project's HTML/JS on this app's origin
         self.send_response(200)
-        self.send_header("Content-Type", ctype or mimetypes.guess_type(str(path))[0] or "application/octet-stream")
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
+        self.security_headers()
         if path.suffix.lower() == ".svg":
             self.send_header("Content-Security-Policy", "script-src 'none'")
+        if ctype.startswith("text/html"):
+            self.send_header("Content-Security-Policy", "frame-ancestors 'none'")   # no framing by other sites
         self.end_headers()
         self.wfile.write(data)
 
@@ -1115,9 +1238,26 @@ class Handler(BaseHTTPRequestHandler):
         if host not in local:
             return False
         origin = self.headers.get("Origin")
-        if origin and origin != "null" and urlparse(origin).hostname not in local:
+        if origin and (origin == "null" or urlparse(origin).hostname not in local):
             return False
         return True
+
+    def authorized(self) -> bool:
+        """The browser holds this user's access key (from the link the app opens), so other programs and other
+        users on the computer can't use the server."""
+        if not TOKEN:
+            return True
+        jar = SimpleCookie()
+        try:
+            jar.load(self.headers.get("Cookie") or "")
+        except Exception:  # noqa: BLE001
+            pass
+        given = jar[COOKIE].value if COOKIE in jar else self.headers.get("X-Latex-Copilot-Token", "")
+        return bool(given) and hmac.compare_digest(given, TOKEN)
+
+    def locked(self):
+        return self.send_json({"error": "locked", "message": "Open Latex-Copilot with the link it printed in its terminal "
+                               "(it includes the key that keeps other programs out), or start it again."}, 403)
 
     def busy(self) -> bool:
         if S.job["state"] == "running":
@@ -1133,16 +1273,26 @@ class Handler(BaseHTTPRequestHandler):
         q = {k: v[0] for k, v in parse_qs(url.query).items()}
         path = url.path
         if path in ("/", "/index.html"):
+            key = q.get("token", "")
+            if key and TOKEN and hmac.compare_digest(key, TOKEN):
+                self.send_response(302)                          # keep the key in a cookie, not in the address bar
+                self.send_header("Location", "/")
+                self.send_header("Set-Cookie", f"{COOKIE}={TOKEN}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000")
+                self.security_headers()
+                self.end_headers()
+                return
             return self.send_file(STATIC / "index.html", "text/html; charset=utf-8")
         if path == "/pdf-extract.js":
             return self.send_file(STATIC / "pdf-extract.js", "text/javascript; charset=utf-8")
-        if path == "/pdf":
-            return self.send_file(S.pdf, "application/pdf")
         if path.startswith("/vendor/"):
             f = (STATIC / "vendor" / path[len("/vendor/"):]).resolve()
             if f.parent != (STATIC / "vendor").resolve():
                 return self.send_error(404)
             return self.send_file(f)
+        if not self.authorized():
+            return self.locked()
+        if path == "/pdf":
+            return self.send_file(S.pdf, "application/pdf")
         if path == "/api/status":
             dirs, files = walk_project()
             src = import_source()
@@ -1178,7 +1328,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": str(e)}, 400)
         if path == "/api/raw":
             try:
-                return self.send_file(resolve_in_root(q.get("path", "")))
+                return self.send_file(resolve_in_root(q.get("path", "")), project_file=True)
             except ValueError as e:
                 return self.send_json({"error": str(e)}, 400)
         if path == "/api/sync/view":
@@ -1195,6 +1345,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": str(e)}, 400)
             return self.send_json({"file": r[0], "line": r[1]} if r else {"error": "No source location here"},
                                   200 if r else 404)
+        if path == "/api/claude":
+            st = claude_status(force=q.get("refresh") == "1")
+            proc = LOGIN["proc"]
+            if st.get("signedIn") and proc and proc.poll() is None:
+                # Signed in, but the command may still wait for Enter: answer it, then make sure it ends.
+                try:
+                    proc.stdin.write("\n")
+                    proc.stdin.flush()
+                except OSError:
+                    pass
+                threading.Timer(5, lambda: proc.poll() is None and kill_tree(proc)).start()
+                LOGIN["state"] = "done"
+            return self.send_json({**st, "login": login_view()})
         if path == "/api/chat":
             since = int(q.get("since", 0))
             with S.lock:
@@ -1215,6 +1378,8 @@ class Handler(BaseHTTPRequestHandler):
         allowed = ctype.startswith("application/json") or (self.path == "/api/import/upload" and ctype.startswith("application/pdf"))
         if not self.from_this_app() or not allowed:
             return self.send_json({"error": "Forbidden"}, 403)
+        if not self.authorized():
+            return self.locked()
         try:
             return self.route_post()
         except (ValueError, KeyError, OSError) as e:
@@ -1327,7 +1492,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if S.tex.exists():
                 return self.send_json({"error": "This project already has a LaTeX document. To import a PDF, start "
-                                                 "tex-annotator in an empty folder, or run: tex-annotator path/to/file.pdf"}, 409)
+                                                 "latex-copilot in an empty folder, or run: latex-copilot path/to/file.pdf"}, 409)
             n = int(self.headers.get("Content-Length", 0))
             if n > MAX_IMPORT:
                 return self.send_json({"error": f"The PDF is larger than {MAX_IMPORT // 2**20} MB."}, 400)
@@ -1360,6 +1525,28 @@ class Handler(BaseHTTPRequestHandler):
                 attach=f"{pages} page{'s' * (pages != 1)}" + (", check against the original" if payload.get("check", True) else ""))
             slog("import started")
             threading.Thread(target=import_worker, args=(payload,), daemon=True, name="pdf-import").start()
+            return self.send_json({"ok": True})
+
+        if self.path == "/api/claude/login":
+            body = self.read_json()
+            err = start_login(console=bool(body.get("console")))
+            return self.send_json({"error": err} if err else {"ok": True, "login": login_view()}, 400 if err else 200)
+
+        if self.path == "/api/claude/login/code":
+            code = (self.read_json().get("code") or "").strip()
+            proc = LOGIN["proc"]
+            if not code or not proc or proc.poll() is not None:
+                return self.send_json({"error": "The sign-in isn't waiting for a code."}, 400)
+            proc.stdin.write(code + "\n")
+            proc.stdin.flush()
+            return self.send_json({"ok": True})
+
+        if self.path == "/api/claude/login/cancel":
+            proc = LOGIN["proc"]
+            LOGIN["cancelled"] = True
+            if proc and proc.poll() is None:
+                kill_tree(proc)
+            LOGIN["state"] = "idle"
             return self.send_json({"ok": True})
 
         if self.path == "/api/chat/new":
@@ -1463,7 +1650,7 @@ def check_requirements() -> bool:
     def first_line(text: str) -> str:
         return (text.strip().splitlines() or [""])[0][:70]
 
-    print(f"tex-annotator {__version__} on {platform.system()} {platform.release()}" + (" (WSL)" if in_wsl() else "") + "\n")
+    print(f"Latex-Copilot {__version__} on {platform.system()} {platform.release()}" + (" (WSL)" if in_wsl() else "") + "\n")
     py_ok = sys.version_info >= (3, 10)
     line(py_ok, "python", f"{sys.version.split()[0]}" + ("" if py_ok else "  (3.10 or newer is required)"))
     ok &= py_ok
@@ -1489,7 +1676,7 @@ def check_requirements() -> bool:
     claude = claude_command()
     if not claude:
         line(False, "claude", "Claude Code is needed: " + hint("claude") + ", then run `claude` once to sign in")
-        print(f"\nInstall the missing pieces above (or run {INSTALLER} again), then run `tex-annotator --check`.")
+        print(f"\nInstall the missing pieces above (or run {INSTALLER} again), then run `latex-copilot --check`.")
         return False
     line(True, "claude", first_line(run([*claude, "--version"])[1]))
     rc, out = run([*claude, "auth", "status"])
@@ -1498,15 +1685,15 @@ def check_requirements() -> bool:
     except ValueError:
         signed_in = True if rc == 0 else False if rc == 1 else None
     line(signed_in, "sign-in", "signed in to Claude" if signed_in else
-         "run `claude` once in a terminal and sign in" if signed_in is False else
+         "use Sign in in Latex-Copilot's chat panel, or run `claude` once in a terminal" if signed_in is False else
          "couldn't check; run `claude` once in a terminal to make sure you're signed in")
     ok &= signed_in is not False
-    print("\nAll set." if ok else f"\nInstall the missing pieces above (or run {INSTALLER} again), then run `tex-annotator --check`.")
+    print("\nAll set." if ok else f"\nInstall the missing pieces above (or run {INSTALLER} again), then run `latex-copilot --check`.")
     return ok
 
 
 def project_for_pdf(pdf: Path) -> Path:
-    """`tex-annotator report.pdf` works in report-latex/ next to the PDF, with the PDF waiting in import/."""
+    """`latex-copilot report.pdf` works in report-latex/ next to the PDF, with the PDF waiting in import/."""
     for i in range(1, 100):
         root = pdf.parent / (f"{pdf.stem}-latex" if i == 1 else f"{pdf.stem}-latex-{i}")
         if (root / "import" / "original.pdf").exists() or (root.is_dir() and find_main(root)):
@@ -1523,18 +1710,20 @@ def project_for_pdf(pdf: Path) -> Path:
 
 
 def main():
-    global S
+    global S, TOKEN
     # Print progress immediately even when stdout isn't a terminal.
     sys.stdout.reconfigure(line_buffering=True, errors="replace")
     sys.stderr.reconfigure(line_buffering=True, errors="replace")
-    ap = argparse.ArgumentParser(prog="tex-annotator", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(prog="latex-copilot", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("project", nargs="?", default=".", help="Project folder or main .tex file (default: current folder)")
     ap.add_argument("--port", type=int, default=8765, help="Port for the local web page (default 8765; the next free one is used if taken)")
     ap.add_argument("--engine", choices=["pdf", "xe", "lua"], default="pdf", help="LaTeX engine: pdflatex (default), xelatex or lualatex")
     ap.add_argument("--model", default=None, help="Claude model to use (default: your Claude Code default)")
     ap.add_argument("--no-browser", action="store_true", help="Don't open the browser automatically")
+    ap.add_argument("--latexmkrc", action="store_true",
+                    help="Use the project's latexmkrc. It's Perl code that runs on every compile: only for projects you trust")
     ap.add_argument("--check", action="store_true", help="Check that the required tools are installed, then exit")
-    ap.add_argument("--version", action="version", version=f"tex-annotator {__version__}")
+    ap.add_argument("--version", action="version", version=f"latex-copilot {__version__}")
     args = ap.parse_args()
     if args.check:
         sys.exit(0 if check_requirements() else 1)
@@ -1546,7 +1735,7 @@ def main():
     elif target.is_dir():
         root = target
         if root == Path.home() or root == Path(root.anchor):
-            sys.exit(f"{root} is your whole home/root folder. Run tex-annotator inside a LaTeX project folder instead.")
+            sys.exit(f"{root} is your whole home/root folder. Run Latex-Copilot inside a LaTeX project folder instead.")
         tex = find_main(root) or root / "main.tex"   # no document yet: the page offers to import a PDF or start one
     elif target.is_file() and target.suffix == ".tex":
         root, tex = target.parent, target
@@ -1554,10 +1743,12 @@ def main():
         sys.exit(f"Not a folder, .tex or .pdf file: {target}")
     missing = [t for t in ("latexmk", "synctex", "claude") if not shutil.which(t)]
     if missing:
-        print(f"warning: not found: {', '.join(missing)}. Run `tex-annotator --check` for help.", file=sys.stderr)
+        print(f"warning: not found: {', '.join(missing)}. Run `latex-copilot --check` for help.", file=sys.stderr)
 
     install_crash_logging()
     S = State(root, tex, args.engine, args.model)
+    S.trust_rc = args.latexmkrc
+    TOKEN = load_token()
     slog(f"starting for project {root} (main {rel(tex)})")
     print(f"Project: {root}")
     if tex.exists():
@@ -1580,10 +1771,10 @@ def main():
         sys.exit("Could not find a free port.")
     server.daemon_threads = True
 
-    url = f"http://127.0.0.1:{port}/"
+    url = f"http://127.0.0.1:{port}/?token={TOKEN}"     # the page keeps the key in a cookie and drops it from the address
     slog(f"serving at {url}")
     print("\n" + "=" * 60)
-    print(f"  tex-annotator is running. Open this in your browser:\n\n      {url}\n")
+    print(f"  Latex-Copilot is running. Open this in your browser:\n\n      {url}\n")
     print("  Leave this terminal open. Press Ctrl+C to stop.")
     print(f"  Log: {LOG_PATH}")
     print("=" * 60 + "\n")

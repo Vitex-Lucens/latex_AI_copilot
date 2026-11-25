@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tex-annotator"
+name = "latex-copilot"
 dynamic = ["version"]
 description = "Overleaf-style local LaTeX editor with Claude built in: chat, PDF annotation, multi-file projects."
 readme = "README.md"
@@ -15,13 +15,13 @@ dependencies = []
 Homepage = "https://github.com/Vitex-Lucens/latex_AI_copilot"
 
 [project.scripts]
-tex-annotator = "tex_annotator.app:main"
+latex-copilot = "latex_copilot.app:main"
 
 [tool.setuptools]
-packages = ["tex_annotator"]
+packages = ["latex_copilot"]
 
 [tool.setuptools.dynamic]
-version = { attr = "tex_annotator.__version__" }
+version = { attr = "latex_copilot.__version__" }
 
 [tool.setuptools.package-data]
-tex_annotator = ["static/*.html", "static/*.js", "static/vendor/*", "prompts/*.md"]
+latex_copilot = ["static/*.html", "static/*.js", "static/vendor/*", "prompts/*.md"]
