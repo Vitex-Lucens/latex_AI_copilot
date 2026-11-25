@@ -1303,6 +1303,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_file(STATIC / "index.html", "text/html; charset=utf-8")
         if path == "/pdf-extract.js":
             return self.send_file(STATIC / "pdf-extract.js", "text/javascript; charset=utf-8")
+        if path in ("/icon.png", "/favicon.ico"):
+            return self.send_file(STATIC / "icon.png", "image/png")
         if path.startswith("/vendor/"):
             f = (STATIC / "vendor" / path[len("/vendor/"):]).resolve()
             if f.parent != (STATIC / "vendor").resolve():

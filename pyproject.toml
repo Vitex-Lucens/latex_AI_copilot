@@ -24,4 +24,4 @@ packages = ["latex_copilot"]
 version = { attr = "latex_copilot.__version__" }
 
 [tool.setuptools.package-data]
-latex_copilot = ["static/*.html", "static/*.js", "static/vendor/*", "prompts/*.md"]
+latex_copilot = ["static/*.html", "static/*.js", "static/*.png", "static/vendor/*", "prompts/*.md"]

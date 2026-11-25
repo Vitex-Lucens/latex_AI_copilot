@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Latex-Copilot</title>
+<link rel="icon" href="/icon.png">
 <script>
   // Apply the theme before first paint.
   (function () {
@@ -54,6 +55,8 @@
 
   header { display: flex; gap: 6px; align-items: center; padding: 7px 10px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   header .title { font: 600 14px system-ui; margin: 0 6px 0 4px; white-space: nowrap; }
+  header .logo { width: 24px; height: 24px; border-radius: 6px; flex: none; margin-left: 2px; }
+  .welcome .logo { width: 56px; height: 56px; border-radius: 12px; float: right; margin: 0 0 8px 12px; }
   header .title small { font: 400 12.5px system-ui; color: var(--muted); margin-left: 4px; }
   header .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
   .spacer { flex: 1; }
@@ -81,6 +84,10 @@
   #zoomLabel { height: 30px; min-width: 52px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line); margin-left: -1px;
     font: 500 12.5px system-ui, sans-serif; font-variant-numeric: tabular-nums; color: var(--muted); background: var(--panel-2); }
   @media (max-width: 1640px) { #toPdf .lbl { display: none; } #toPdf { width: 30px; padding: 0; justify-content: center; } }
+  @media (max-width: 1500px) {   /* keep the toolbar on one line: tools and Undo show icons (tooltips name them) */
+    .seg button .lbl, #undoClaude .lbl { display: none; }
+    .seg button:has(.lbl), #undoClaude { width: 30px; padding: 0; justify-content: center; }
+  }
   @media (max-width: 1280px) { header .lbl { display: none; } header button:has(.lbl) { width: 30px; padding: 0; justify-content: center; } header button.primary:has(.lbl) { width: auto; padding: 0 11px; } header button.primary .lbl { display: inline; } }
 
   #banner { display: none; background: var(--err-bg); color: var(--err); border-bottom: 1px solid var(--err-line); padding: 6px 12px; font-weight: 600; }
@@ -229,7 +236,8 @@
   #contextLabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #send { margin-left: auto; }
   #composeRow2 { display: flex; gap: 6px; align-items: center; }
-  #composeRow2 select { height: 28px; font-size: 12.5px; padding: 0 6px; }
+  #composeRow2 select { height: 28px; font-size: 12.5px; padding: 0 6px; flex: 1 1 0; min-width: 0; }
+  #composeRow2 #send { flex: none; }
   #ctxMeter { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
   #ctxMeter.warn { color: #d97706; font-weight: 600; }
 
@@ -272,6 +280,7 @@
 <div id="app">
 <header>
   <button id="toggleTree" class="icon" title="Show/hide the file tree"><i data-icon="panelLeft"></i></button>
+  <img class="logo" src="/icon.png" alt="">
   <span class="title" id="docName">Latex-Copilot</span>
   <span class="sep"></span>
   <button id="saveCompile" class="primary" title="Save all and recompile (Ctrl+S)"><i data-icon="play"></i><span class="lbl">Recompile</span></button>
@@ -963,12 +972,12 @@ function updateEmpty(show = !pdfDoc) {
       <p>Follow along in the chat. Claude reads the extracted text and the page images and writes the LaTeX a few pages at a time; the app compiles it${store.get("importCheck", true) ? " and Claude checks it against the original" : ""}.</p>
       <p>The document opens here when it's done. Press Stop in the chat to cancel.</p></div>`;
   } else if (status.importSource) {
-    el.innerHTML = `<div class="welcome" id="welcome"><h2>Rebuild ${name} as LaTeX</h2>
+    el.innerHTML = `<div class="welcome" id="welcome"><img class="logo" src="/icon.png" alt=""><h2>Rebuild ${name} as LaTeX</h2>
       <p>Claude rebuilds the PDF as an editable LaTeX document: text as real text, tables as tables, maths as maths, and figures as images with their labels as editable text on top.</p>
       <div class="actions"><button class="primary" data-act="convert" ${status.gs ? "" : "disabled"}>${icon("play")}Convert to LaTeX</button>
         <button data-act="import">${icon("fileImport")}Choose another PDF…</button></div>${checkBox}${fine}</div>`;
   } else {
-    el.innerHTML = `<div class="welcome" id="welcome"><h2>No LaTeX document here yet</h2>
+    el.innerHTML = `<div class="welcome" id="welcome"><img class="logo" src="/icon.png" alt=""><h2>No LaTeX document here yet</h2>
       <p>Import a PDF and Claude rebuilds it as LaTeX: text as real text, tables as tables, maths as maths, and figures as images with their labels as editable text on top. Then edit it here like any other document.</p>
       <div class="actions"><button class="primary" data-act="import" ${status.gs ? "" : "disabled"}>${icon("fileImport")}Import a PDF…</button>
         <button data-act="blank">${icon("filePlus")}Start a blank document</button></div>${checkBox}

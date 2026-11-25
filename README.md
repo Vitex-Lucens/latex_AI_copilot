@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/banner.png" alt="Latex-Copilot" width="640"></p>
+
 # Latex-Copilot
 
 An Overleaf-style LaTeX editor that runs on your own computer, with Claude built in.
