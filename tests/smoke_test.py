@@ -135,7 +135,7 @@ def main():
     assert any(p.endswith("secret.txt") for p in listed), res
     print("blocked:", listed, f"({ver})")
     app.trust_project(files=app.S.outside_found)        # what "Allow" does
-    res = app.compile_tex()
+    res = app.compile_tex(force=True)
     assert res["ok"] and (peek / "main.pdf").exists(), res["errors"]
     print("compiles once allowed")
 

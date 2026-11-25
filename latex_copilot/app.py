@@ -345,11 +345,8 @@ def shell_word(s: str) -> str:
     return subprocess.list2cmdline([s]) if os.name == "nt" else shlex.quote(s)
 
 
-def perl_string(s: str) -> str:
-    return '"' + re.sub(r'([\\"$@])', r"\\\1", s) + '"'
-
-
-def compile_tex() -> dict:
+def compile_tex(force: bool = False) -> dict:
+    """Compile the main document. force: even if no file changed (after allowing something, say)."""
     if not S.tex.exists():                 # empty project: nothing to compile yet
         S.last_compile = {"ok": None, "errors": "", "time": time.time()}
         return S.last_compile
@@ -363,17 +360,21 @@ def compile_tex() -> dict:
         return S.last_compile
     engine_flag = {"pdf": "-pdf", "xe": "-xelatex", "lua": "-lualatex"}[eng]
     # biber, which latexmk runs between TeX passes, can download from the internet. It goes through a guard that
-    # won't run it once the document has read files outside the project, so they can't be sent anywhere.
+    # won't run it once the document has read files outside the project, so they can't be sent anywhere. (The
+    # command goes in an environment variable: Windows' latexmk wrapper drops quotes inside -e code.)
     biber = " ".join(shell_word(a) for a in (sys.executable, "-X", "utf8", str(HERE / "texsafety.py"), "biber"))
     cmd = [
         "latexmk", engine_flag, "-synctex=1", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error",
-        "-e", f"$biber = {perl_string(biber + ' %O %S')};", S.tex.name,
+        "-e", "$biber=$ENV{LATEX_COPILOT_BIBER};", S.tex.name,
     ]
+    if force:
+        cmd.insert(1, "-g")
     if not S.trust_rc:
         # A latexmkrc file is Perl code that latexmk runs. One in the project (from a shared project, or written
         # by Claude after reading a booby-trapped document) could run anything, so it's ignored unless trusted.
         cmd.insert(1, "-norc")
-    env = dict(os.environ, LATEX_COPILOT_ROOT=str(S.root), LATEX_COPILOT_TRUST=str(TRUST_FILE))
+    env = dict(os.environ, LATEX_COPILOT_ROOT=str(S.root), LATEX_COPILOT_TRUST=str(TRUST_FILE),
+               LATEX_COPILOT_BIBER=biber + " %O %S")
     if tex_distribution() == "texlive":
         # Older TeX Live stops reads outside the project itself; TeX Live 2026 and MiKTeX don't, which the check
         # below covers. Not once the user has allowed files outside the project, as TeX would refuse those.
@@ -1503,7 +1504,7 @@ class Handler(BaseHTTPRequestHandler):
                 trust_project(files=S.outside_found)
             if body.get("lualatex"):
                 trust_project(lualatex=True)
-            return self.send_json(compile_tex())
+            return self.send_json(compile_tex(force=True))     # latexmk would otherwise repeat the last result
 
         if self.path == "/api/file":
             if self.busy():
