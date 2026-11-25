@@ -269,6 +269,12 @@
   .welcome label.check input { margin-top: 3px; }
   .welcome .fine { font-size: 12px; color: var(--muted); margin-top: 12px; }
   .welcome .warn { color: var(--err); font-size: 13px; margin-top: 10px; }
+  #blocked .welcome { margin-top: 16px; border-left: 3px solid var(--err); }
+  #blocked ul { margin: 8px 0; padding-left: 20px; font-size: 13px; }
+  #blocked li { margin: 3px 0; overflow-wrap: anywhere; }
+  #updateLink { display: inline-flex; align-items: center; height: 26px; padding: 0 10px; margin-right: 6px; border-radius: 999px;
+    border: 1px solid #d97706; color: #d97706; font-size: 12px; font-weight: 600; text-decoration: none; white-space: nowrap; }
+  #updateLink[hidden] { display: none; }
   .welcome.drop { outline: 2px dashed var(--accent); outline-offset: 4px; }
   #viewTag { display: none; position: sticky; top: -8px; z-index: 4; margin: -6px auto 10px; width: fit-content; font: 600 12px system-ui, sans-serif;
              color: var(--accent-ink); background: var(--accent); padding: 3px 12px; border-radius: 999px; box-shadow: 0 1px 3px var(--page-shadow); }
@@ -306,6 +312,7 @@
   <span class="sep"></span>
   <button id="undoClaude" title="Restore the files from before Claude's last edit" disabled><i data-icon="history"></i><span class="lbl">Undo Claude edit</span></button>
   <span class="spacer"></span>
+  <a id="updateLink" hidden target="_blank" rel="noopener"></a>
   <select id="theme" title="Theme">
     <option value="auto">Auto</option>
     <option value="light">Light</option>
@@ -338,7 +345,7 @@
     <div id="editorFoot"><span id="dirty"></span><span class="spacer"></span><span class="keys">Ctrl+S compile · Ctrl+F find · Ctrl+Enter → PDF</span></div>
   </div>
   <div class="splitter" id="splitEditor" title="Drag to resize · double-click to reset"></div>
-  <div id="viewer"><div id="viewTag">The PDF you imported · press O or Original to go back</div><div id="pages"></div><div id="empty" hidden></div></div>
+  <div id="viewer"><div id="viewTag">The PDF you imported · press O or Original to go back</div><div id="blocked" hidden></div><div id="pages"></div><div id="empty" hidden></div></div>
   <input type="file" id="importInput" accept="application/pdf,.pdf" hidden>
   <div class="splitter" id="splitAside" title="Drag to resize · double-click to reset"></div>
   <aside>
@@ -882,7 +889,7 @@ async function setMain(path) {
     if (!(await saveAll())) return;
     const r = await api("/api/main", { body: { path } });
     note(`Main document is now ${r.main}.`, "info");
-    if (!r.compile.ok) note(r.compile.errors, "error");
+    compiled(r.compile);
     await refreshTree();
     await loadPdf(false);
   } catch (e) { note(e.message, "error"); }
@@ -953,12 +960,68 @@ const BLANK_DOC = "\\documentclass[11pt]{article}\n\\usepackage[T1]{fontenc}\n\\
   + "\\usepackage[a4paper,margin=25mm]{geometry}\n\n\\title{Untitled}\n\\author{}\n\\date{\\today}\n\n"
   + "\\begin{document}\n\\maketitle\n\nStart writing here.\n\n\\end{document}\n";
 
+// ------------------------------------------------ compiles the app stopped ----
+// A document that used files from outside its project (how a document copies private files into its PDF),
+// or that asked for LuaLaTeX (whose Lua code can change any file), needs the user's OK for this project.
+function compiled(c, say = false) {
+  if (!c) return;
+  status.compile = c;
+  renderBlocked();
+  if (!c.ok) note(c.errors, "error");
+  else if (say) note("Compiled.", "ok");
+}
+
+let blockedSig = "";
+function renderBlocked() {
+  const b = status.compile?.blocked || null;
+  const sig = JSON.stringify(b);
+  if (sig === blockedSig) return;
+  blockedSig = sig;
+  const el = $("#blocked");
+  el.hidden = !b;
+  if (!b) { el.innerHTML = ""; return; }
+  if (b.kind === "lualatex") {
+    el.innerHTML = `<div class="welcome"><h2>This document asks for LuaLaTeX</h2>
+      <p>LuaLaTeX lets a document run Lua code that can read and change any of your files, so Latex-Copilot only uses it for documents you trust.</p>
+      <div class="actions"><button class="primary" data-act="allowLua">${icon("play")}Use LuaLaTeX for this project</button></div>
+      <p class="fine">Or change the document's first line to <code>% !TEX program = xelatex</code>. XeLaTeX can use the same fonts and can't run code.</p></div>`;
+  } else {
+    const files = b.files.map(f => `<li><code>${esc(f.path)}</code>${f.kind === "write" ? " (written)" : ""}</li>`).join("");
+    el.innerHTML = `<div class="welcome"><h2>No PDF: files from outside the project</h2>
+      <p>This document used files outside its project folder. That's how a document can copy private files into its PDF, so the PDF was removed:</p>
+      <ul>${files}</ul>
+      <p>If they belong in the document, allow them for this project. If not, remove them from the document.</p>
+      <div class="actions"><button class="primary" data-act="allowFiles">Allow ${b.files.length === 1 ? "this file" : "these files"}</button></div></div>`;
+  }
+}
+
+$("#blocked").addEventListener("click", async e => {
+  const act = e.target.closest("button")?.dataset.act;
+  if (!act || busy) return;
+  setBusy(true);
+  try {
+    compiled(await api("/api/trust", { body: act === "allowLua" ? { lualatex: true } : { files: true } }), true);
+    await loadPdf(true);
+  } catch (err) { note(err.message, "error"); }
+  finally { setBusy(false); }
+});
+
+function renderUpdate() {
+  const u = status.update, a = $("#updateLink");
+  a.hidden = !u;
+  if (!u) return;
+  a.href = u.url;
+  a.textContent = `Update to ${u.version}`;
+  a.title = `Latex-Copilot ${u.version} is out. To update, run the installer again (see the release page).`;
+}
+
 function updateEmpty(show = !pdfDoc) {
   const el = $("#empty");
   el.hidden = !show;
   if (!show) return;
   if (status.mainExists && !(busy && jobKind === "import")) {
-    el.innerHTML = `<p style="margin-top:80px">${viewOriginal ? "The imported PDF couldn't be shown." : "No PDF yet. Fix the compile errors shown in the chat, then Recompile."}</p>`;
+    el.innerHTML = viewOriginal ? `<p style="margin-top:80px">The imported PDF couldn't be shown.</p>`
+      : status.compile?.blocked ? "" : `<p style="margin-top:80px">No PDF yet. Fix the compile errors shown in the chat, then Recompile.</p>`;
     return;
   }
   const name = esc(status.importSource || "the PDF");
@@ -1826,9 +1889,7 @@ async function saveAndCompile() {
   setBusy(true);
   try {
     if (!(await saveAll())) return;
-    const res = await api("/api/compile", { method: "POST" });
-    if (!res.ok) note(res.errors, "error");
-    else note("Compiled.", "ok");
+    compiled(await api("/api/compile", { method: "POST" }), true);
     await loadPdf(true);
   } catch (e) {
     note("Compile request failed: " + e.message, "error");
@@ -1844,7 +1905,7 @@ $("#undoClaude").onclick = async () => {
   try {
     const res = await api("/api/undo", { method: "POST" });
     await syncChat();
-    if (!res.compile.ok) note(res.compile.errors, "error");
+    compiled(res.compile);
     claudeChanges = {};
     await refreshTree();
     for (const [p, d] of [...docs]) {
@@ -1862,8 +1923,11 @@ $("#undoClaude").onclick = async () => {
 // ---------------------------------------------------------------- status ----
 async function refreshStatus() {
   const s = await api("/api/status");
-  const changed = s.mainExists !== status.mainExists || s.importSource !== status.importSource || s.gs !== status.gs;
+  const changed = s.mainExists !== status.mainExists || s.importSource !== status.importSource || s.gs !== status.gs
+    || JSON.stringify(s.compile?.blocked || null) !== JSON.stringify(status.compile?.blocked || null);
   status = s;
+  renderBlocked();
+  renderUpdate();
   $("#undoClaude").disabled = busy || !s.canUndo;
   $("#viewOriginal").hidden = !(s.importSource && s.mainExists);
   if (viewOriginal && $("#viewOriginal").hidden) setView(false);

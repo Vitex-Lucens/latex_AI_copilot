@@ -59,8 +59,9 @@ say that in LaTeX.
    - Headings (`titlesec`), colours (`xcolor`, with the measured hex values), running headers and footers
      (`fancyhdr`, set once, never repeated in the body), lists (`enumitem`), captions (`caption`), links
      (`hyperref`). Only use packages the extraction lists as installed.
-   - Prefer pdfLaTeX. If the text needs characters pdfLaTeX can't typeset (Chinese, Arabic, emoji…), make
-     `% !TEX program = lualatex` the first line of main.tex and use `fontspec`.
+   - Prefer pdfLaTeX. If the text needs characters pdfLaTeX can't typeset (Chinese, Arabic…), make
+     `% !TEX program = xelatex` the first line of main.tex and use `fontspec`. Not LuaLaTeX: the app only runs
+     it for projects the user trusts.
 
 4. **Body: go through the extraction block by block.**
    - Text verbatim: keep the wording, numbering, capitalisation and punctuation. Escape LaTeX's special

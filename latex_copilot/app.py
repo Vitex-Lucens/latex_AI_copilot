@@ -27,6 +27,7 @@ import os
 import platform
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import subprocess
@@ -35,6 +36,7 @@ import tempfile
 import threading
 import time
 import traceback
+import urllib.request
 import webbrowser
 from collections import defaultdict
 from http.cookies import SimpleCookie
@@ -44,10 +46,11 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 try:
     from . import __version__
-    from . import pdf_import
+    from . import pdf_import, texsafety
 except ImportError:  # run as a plain script
     __version__ = "dev"
     import pdf_import  # type: ignore[no-redef]
+    import texsafety  # type: ignore[no-redef]
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
@@ -57,6 +60,9 @@ LOG_PATH = CACHE / "server.log"
 COOKIE = "latex_copilot"          # holds the access key in the browser
 TOKEN = ""                        # this user's access key, set in main()
 TRASH = CACHE / "trash"
+TRUST_FILE = CACHE / "trust.json"   # what the user allowed per project (outside every project, out of Claude's reach)
+REPO = "Vitex-Lucens/latex_AI_copilot"
+UPDATE: dict = {}                   # {"version", "url"} when a newer release is out
 
 # Files the editor (and Claude's undo tracking) treat as editable text.
 TEXT_EXTS = {".tex", ".bib", ".sty", ".cls", ".bst", ".cfg", ".txt", ".md", ".dtx", ".ins", ".csv", ".dat"}
@@ -75,6 +81,15 @@ MAX_JSON = 120 * 1024 * 1024       # requests with JSON bodies (an imported PDF'
 # --------------------------------------------------------------------------- #
 # Logging (so a crash or kill leaves evidence)
 # --------------------------------------------------------------------------- #
+
+def secure_cache():
+    """The cache folder holds the access key, the last prompt sent to Claude and the log: only for this user."""
+    CACHE.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(CACHE, 0o700)
+    except OSError:
+        pass
+
 
 def load_token() -> str:
     """This user's access key for the local server: random, kept in a file only this user can read."""
@@ -155,6 +170,7 @@ class State:
         self.undo: dict[str, str | None] | None = None  # abs path -> content before Claude's last edit (None = created)
         self.progress = ""                 # what a long job (PDF import) is doing right now, shown while it runs
         self.trust_rc = False              # run the project's latexmkrc (it's Perl code): only with --latexmkrc
+        self.outside_found: list[str] = [] # files outside the project the last compile used (what "Allow" allows)
 
     @property
     def pdf(self) -> Path:
@@ -296,33 +312,99 @@ def tex_distribution() -> str:
     return TEX_DIST["name"]
 
 
+LUA_BLOCKED = ("This document asks for LuaLaTeX (% !TEX program = lualatex). LuaLaTeX lets a document run Lua code "
+               "that can read and change any of your files, so Latex-Copilot only uses it for documents you trust. "
+               "To compile it, allow LuaLaTeX for this project at the top of the PDF pane, or change that line to "
+               "% !TEX program = xelatex.")
+
+
+def project_trust() -> dict:
+    return texsafety.project_trust(TRUST_FILE, S.root)
+
+
+def trust_project(files: list[str] | None = None, lualatex: bool | None = None):
+    """Remember what the user allowed for this project. It's kept outside the project, so a document (or Claude,
+    which only works inside the project) can't allow anything itself."""
+    data = texsafety.load_trust(TRUST_FILE)
+    entry = data.setdefault("projects", {}).setdefault(texsafety.key(str(S.root)), {})
+    if files:
+        entry["files"] = sorted(set(entry.get("files", [])) | set(files))
+    if lualatex is not None:
+        entry["lualatex"] = lualatex
+    secure_cache()
+    TRUST_FILE.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    slog(f"allowed for {S.root}: " + ("LuaLaTeX" if lualatex else ", ".join(files or [])))
+
+
+def shown_path(path: str) -> str:
+    home = str(Path.home())
+    return "~" + path[len(home):] if path.startswith(home + os.sep) else path
+
+
+def shell_word(s: str) -> str:
+    return subprocess.list2cmdline([s]) if os.name == "nt" else shlex.quote(s)
+
+
+def perl_string(s: str) -> str:
+    return '"' + re.sub(r'([\\"$@])', r"\\\1", s) + '"'
+
+
 def compile_tex() -> dict:
     if not S.tex.exists():                 # empty project: nothing to compile yet
         S.last_compile = {"ok": None, "errors": "", "time": time.time()}
         return S.last_compile
-    engine_flag = {"pdf": "-pdf", "xe": "-xelatex", "lua": "-lualatex"}[engine()]
+    trust = project_trust()
+    eng = engine()
+    if eng == "lua" and S.engine != "lua" and not trust.get("lualatex"):
+        # The document picked LuaLaTeX itself. Its Lua code could change any file (TeX's limits don't apply to Lua),
+        # so LuaLaTeX needs the user's say-so: --engine lua, or allowed for this project in the PDF pane.
+        S.last_compile = {"ok": False, "errors": LUA_BLOCKED, "blocked": {"kind": "lualatex"}, "time": time.time()}
+        slog(f"compile {rel(S.tex)} blocked: the document asks for LuaLaTeX")
+        return S.last_compile
+    engine_flag = {"pdf": "-pdf", "xe": "-xelatex", "lua": "-lualatex"}[eng]
+    # biber, which latexmk runs between TeX passes, can download from the internet. It goes through a guard that
+    # won't run it once the document has read files outside the project, so they can't be sent anywhere.
+    biber = " ".join(shell_word(a) for a in (sys.executable, "-X", "utf8", str(HERE / "texsafety.py"), "biber"))
     cmd = [
-        "latexmk", engine_flag, "-synctex=1", "-interaction=nonstopmode",
-        "-halt-on-error", "-file-line-error", S.tex.name,
+        "latexmk", engine_flag, "-synctex=1", "-interaction=nonstopmode", "-halt-on-error", "-file-line-error",
+        "-e", f"$biber = {perl_string(biber + ' %O %S')};", S.tex.name,
     ]
     if not S.trust_rc:
         # A latexmkrc file is Perl code that latexmk runs. One in the project (from a shared project, or written
         # by Claude after reading a booby-trapped document) could run anything, so it's ignored unless trusted.
         cmd.insert(1, "-norc")
-    # TeX Live: LaTeX may only read and write files in the project (and its own installation), so a document
-    # can't pull other files from the computer (e.g. \input{~/.ssh/...}) into the PDF. Newer TeX Live ignores
-    # the environment variable, so the engines also get it as a configuration line. (MiKTeX has neither.)
-    env = dict(os.environ)
+    env = dict(os.environ, LATEX_COPILOT_ROOT=str(S.root), LATEX_COPILOT_TRUST=str(TRUST_FILE))
     if tex_distribution() == "texlive":
-        env.update(openin_any="p", openout_any="p")
-        cmd.insert(1, "-latexoption=-cnf-line=openin_any=p")
+        # Older TeX Live stops reads outside the project itself; TeX Live 2026 and MiKTeX don't, which the check
+        # below covers. Not once the user has allowed files outside the project, as TeX would refuse those.
+        env["openout_any"] = "p"
+        if not trust.get("files"):
+            env["openin_any"] = "p"
     with S.compile_lock:
         proc = subprocess.run(cmd, cwd=S.tex.parent, capture_output=True, text=True, encoding="utf-8",
                               errors="replace", stdin=subprocess.DEVNULL, env=env)
     ok = proc.returncode == 0
     errors = "" if ok else extract_errors(proc.stdout + "\n" + proc.stderr)
-    S.last_compile = {"ok": ok, "errors": errors, "time": time.time()}
-    slog(f"compile {rel(S.tex)} {'ok' if ok else 'FAILED'}")
+    # Files outside the project (other than TeX's own and fonts) that the document read or wrote: that's how a
+    # document copies private files into its PDF, so the PDF goes until the user allows them for this project.
+    found = texsafety.outside(S.root, S.tex.with_suffix(".fls"), proc.stdout + "\n" + proc.stderr,
+                              trust.get("files", []))
+    S.outside_found = [p for _, p in found]
+    extra = {}
+    if found:
+        for f in (S.pdf, S.tex.with_suffix(".synctex.gz")):
+            try:
+                f.unlink()
+            except OSError:
+                pass
+        ok = False
+        listed = "\n".join(f"  {shown_path(p)}" + (" (written)" if k == "write" else "") for k, p in found)
+        errors = ("The PDF was removed: this document used files outside its project folder, which is how a "
+                  f"document can copy private files into its PDF:\n{listed}\nIf they belong in it, allow them at the "
+                  "top of the PDF pane. Otherwise remove them from the document.")
+        extra["blocked"] = {"kind": "files", "files": [{"path": shown_path(p), "kind": k} for k, p in found]}
+    S.last_compile = {"ok": ok, "errors": errors, "time": time.time(), **extra}
+    slog(f"compile {rel(S.tex)} " + ("ok" if ok else "blocked: files outside the project" if found else "FAILED"))
     return S.last_compile
 
 
@@ -1328,6 +1410,7 @@ class Handler(BaseHTTPRequestHandler):
                 "pdfExists": S.pdf.exists(),
                 "pdfMtime": S.pdf.stat().st_mtime if S.pdf.exists() else 0,
                 "compile": S.last_compile,
+                "update": UPDATE or None,
                 "canUndo": bool(S.undo),
                 "job": {"state": S.job["state"]},
                 "files": {rel(p): p.stat().st_mtime for p in text_files(files)},
@@ -1408,6 +1491,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def route_post(self):
         if self.path == "/api/compile":
+            return self.send_json(compile_tex())
+
+        if self.path == "/api/trust":
+            # Only what the last compile reported can be allowed, never paths sent in the request.
+            if self.busy():
+                return
+            body = self.read_json()
+            if body.get("files") and S.outside_found:
+                trust_project(files=S.outside_found)
+            if body.get("lualatex"):
+                trust_project(lualatex=True)
             return self.send_json(compile_tex())
 
         if self.path == "/api/file":
@@ -1730,6 +1824,37 @@ def project_for_pdf(pdf: Path) -> Path:
     sys.exit(f"Couldn't find a free folder name next to {pdf}.")
 
 
+def version_tuple(v: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
+
+
+def check_for_update():
+    """At most once a day, ask GitHub for the latest release's version number (nothing about you is sent)."""
+    if __version__ == "dev":
+        return
+    cache = CACHE / "update-check.json"
+    try:
+        data = json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    if time.time() - data.get("checked", 0) > 86400:
+        try:
+            req = urllib.request.Request(f"https://api.github.com/repos/{REPO}/releases/latest", headers={
+                "Accept": "application/vnd.github+json", "User-Agent": f"latex-copilot/{__version__}"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                rel_ = json.loads(r.read())
+            data = {"checked": time.time(), "version": str(rel_["tag_name"]).lstrip("v"), "url": rel_["html_url"]}
+            cache.write_text(json.dumps(data), encoding="utf-8")
+        except (OSError, ValueError, KeyError, TypeError):
+            return
+    v = data.get("version") or ""
+    if v and version_tuple(v) > version_tuple(__version__):
+        UPDATE.update(version=v, url=data.get("url") or f"https://github.com/{REPO}/releases/latest")
+        slog(f"update available: {v}")
+        print(f"\n  Latex-Copilot {v} is out (you have {__version__}). To update, run the installer again:\n"
+              f"  {UPDATE['url']}\n")
+
+
 def main():
     global S, TOKEN
     # Print progress immediately even when stdout isn't a terminal.
@@ -1743,6 +1868,8 @@ def main():
     ap.add_argument("--no-browser", action="store_true", help="Don't open the browser automatically")
     ap.add_argument("--latexmkrc", action="store_true",
                     help="Use the project's latexmkrc. It's Perl code that runs on every compile: only for projects you trust")
+    ap.add_argument("--no-update-check", action="store_true",
+                    help="Don't ask GitHub once a day whether a newer version is out (or set LATEX_COPILOT_NO_UPDATE_CHECK=1)")
     ap.add_argument("--check", action="store_true", help="Check that the required tools are installed, then exit")
     ap.add_argument("--version", action="version", version=f"latex-copilot {__version__}")
     args = ap.parse_args()
@@ -1766,6 +1893,7 @@ def main():
     if missing:
         print(f"warning: not found: {', '.join(missing)}. Run `latex-copilot --check` for help.", file=sys.stderr)
 
+    secure_cache()
     install_crash_logging()
     S = State(root, tex, args.engine, args.model)
     S.trust_rc = args.latexmkrc
@@ -1793,7 +1921,7 @@ def main():
     server.daemon_threads = True
 
     url = f"http://127.0.0.1:{port}/?token={TOKEN}"     # the page keeps the key in a cookie and drops it from the address
-    slog(f"serving at {url}")
+    slog(f"serving at http://127.0.0.1:{port}/")              # not the key: logs get shared when asking for help
     print("\n" + "=" * 60)
     print(f"  Latex-Copilot is running. Open this in your browser:\n\n      {url}\n")
     print("  Leave this terminal open. Press Ctrl+C to stop.")
@@ -1801,6 +1929,8 @@ def main():
     print("=" * 60 + "\n")
     if not args.no_browser:
         threading.Timer(0.5, open_browser, args=(url,)).start()
+    if not (args.no_update_check or os.environ.get("LATEX_COPILOT_NO_UPDATE_CHECK")):
+        threading.Thread(target=check_for_update, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -14,13 +14,13 @@ No LaTeX source? Import a PDF, and Claude rebuilds it as an editable LaTeX docum
 **macOS, Ubuntu (or another Linux), or WSL:** paste this into a terminal:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Vitex-Lucens/latex_AI_copilot/main/install.sh | bash
+curl -fsSL https://github.com/Vitex-Lucens/latex_AI_copilot/releases/latest/download/install.sh | bash
 ```
 
 **Windows 10 or 11:** paste this into PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/Vitex-Lucens/latex_AI_copilot/main/install.ps1 | iex
+irm https://github.com/Vitex-Lucens/latex_AI_copilot/releases/latest/download/install.ps1 | iex
 ```
 
 The installer checks what Latex-Copilot needs and offers to install anything that's missing, asking before each step:
@@ -39,7 +39,8 @@ Installing TeX and the other tools asks for your password (macOS, Linux) or for 
 Afterwards, **open a new terminal**. The installer offers to sign you in to Claude straight away (it opens your browser). If you skip that, Latex-Copilot shows a **Sign in** button in its chat panel. It uses your own Claude account (Pro, Max, Team or Enterprise, or an Anthropic Console account), so there's no API key to manage.
 
 - **From a copy** of this repository (a git clone or the zip): run `./install.sh` (macOS, Linux), or double-click `install.cmd` (Windows).
-- **To update:** run the installer again.
+- **To update:** run the installer again. When a new version is out, Latex-Copilot shows **Update** in its toolbar.
+- **Versions:** the commands above install the latest [release](https://github.com/Vitex-Lucens/latex_AI_copilot/releases), which has passed the tests on Windows, macOS and Ubuntu. Each release's own installer installs exactly that version, and its `SHA256SUMS.txt` lists the files' checksums.
 - **To remove the app:** `~/.local/share/latex-copilot/install.sh --uninstall` (macOS, Linux) or `%LOCALAPPDATA%\latex-copilot\app\install.cmd -Uninstall` (Windows). Python, TeX, Ghostscript and Claude Code stay installed.
 - **Other Linux distributions:** install Python 3.10+, TeX with `latexmk`, and Ghostscript with your package manager; the installer then installs the app.
 - **To check your setup** at any time: `latex-copilot --check`.
@@ -85,13 +86,14 @@ Conversion uses your Claude account like any other request: the model chosen und
 ### Options
 
 ```
-latex-copilot [PROJECT | MAIN.tex | FILE.pdf] [--engine pdf|xe|lua] [--model MODEL] [--port N] [--no-browser] [--latexmkrc]
+latex-copilot [PROJECT | MAIN.tex | FILE.pdf] [--engine pdf|xe|lua] [--model MODEL] [--port N] [--no-browser] [--latexmkrc] [--no-update-check]
 ```
 
-- `--engine xe` or `--engine lua` compiles with XeLaTeX or LuaLaTeX. The default is pdfLaTeX. A first line `% !TEX program = xelatex` (or `lualatex`) in the main file does the same for that document.
+- `--engine xe` or `--engine lua` compiles with XeLaTeX or LuaLaTeX. The default is pdfLaTeX. A first line `% !TEX program = xelatex` in the main file does the same for that document. A document that asks for LuaLaTeX this way (`% !TEX program = lualatex`) needs your OK first, in the PDF pane, because LuaLaTeX documents can run Lua code that changes your files.
 - `--model` picks the Claude model. By default it uses your Claude Code default.
 - `--port` sets the port. If 8765 is busy, it uses the next free one automatically.
 - `--latexmkrc` uses the project's `latexmkrc` file. It's off by default because a `latexmkrc` is a program that runs on every compile: only use it for projects you trust (for example ones that need `-shell-escape`).
+- `--no-update-check` stops the daily check for a new version (so does setting `LATEX_COPILOT_NO_UPDATE_CHECK=1`).
 
 ## Good to know
 
@@ -102,8 +104,8 @@ latex-copilot [PROJECT | MAIN.tex | FILE.pdf] [--engine pdf|xe|lua] [--model MOD
   - Press **New chat** when you move on to something unrelated: every message re-sends the whole conversation, and the meter turns orange when it gets long.
   - Your PDF annotations are sent compactly: the text they cover, the matching `.tex` lines, and a small cropped image only for pencil marks.
   - Claude starts with only the file tools this app needs. None of your other Claude Code plugins, connectors or skills are loaded.
-- **Security:** the app runs on your computer and only accepts connections from your own browser, with its access key. Compiling never runs code from the project (no `latexmkrc`, no shell escape); with older TeX Live a document also can't read files outside its project (newer TeX Live and MiKTeX don't enforce that). Claude can only read and edit files in the project. See [SECURITY.md](SECURITY.md).
-- **Privacy:** only what you send to Claude leaves your machine: your messages, the files it reads, and images of the pages you annotated. Importing a PDF sends Claude the extracted text and images of the pages.
+- **Security:** the app runs on your computer and only accepts connections from your own browser, with its access key. Compiling never runs code from the project (no `latexmkrc`, no shell escape, no LuaLaTeX without your OK). If a document uses files from outside its project folder (that's how a document could copy private files into its PDF), the PDF is removed and the PDF pane lists them, until you allow them for that project. Claude can only read and edit files in the project. See [SECURITY.md](SECURITY.md).
+- **Privacy:** only what you send to Claude leaves your machine: your messages, the files it reads, and images of the pages you annotated. Importing a PDF sends Claude the extracted text and images of the pages. Once a day the app also asks GitHub for the latest version number (`--no-update-check` turns that off).
 - **Problems?** Run `latex-copilot --check`. If the page shows "Lost connection", look at the terminal where Latex-Copilot is running, and at `~/.cache/latex-copilot/server.log`. To see exactly what was last sent to Claude, open `~/.cache/latex-copilot/last-prompt.md`.
 
 ## For developers

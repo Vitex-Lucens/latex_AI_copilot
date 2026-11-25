@@ -3,9 +3,9 @@
 Smoke test for Latex-Copilot on Windows, macOS and Linux: everything that depends on the system. It checks
 compiling with latexmk, SyncTeX both ways, the PDF import analysis (with the browser's pdf.js text
 extraction run under Node.js), that the generated layered LaTeX compiles, that the server answers, and the
-security measures: a project's latexmkrc doesn't run, the server needs its access key, and project HTML is
-served as plain text. Whether LaTeX can read or write files outside the project depends on the TeX version, so
-those checks report a warning rather than fail.
+security measures: a project's latexmkrc doesn't run, files from outside the project never reach a PDF until
+allowed, documents can't write outside the project, a document can't pick LuaLaTeX by itself, biber doesn't
+run after outside reads, the server needs its access key, and project HTML is served as plain text.
 Claude Code isn't needed. CI runs it on all three systems; it's also handy locally:
 
     python tests/smoke_test.py
@@ -25,7 +25,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from latex_copilot import app, pdf_import  # noqa: E402
+os.environ["LATEX_COPILOT_NO_UPDATE_CHECK"] = "1"     # the server started below needn't ask GitHub
+from latex_copilot import app, pdf_import, texsafety  # noqa: E402
 
 SAMPLE = r"""\documentclass{article}
 \usepackage[a4paper,margin=25mm]{geometry}
@@ -118,37 +119,57 @@ def main():
     assert not marker.exists(), "the project's latexmkrc was run"
     (proj / "latexmkrc").unlink()
 
-    step("LaTeX reading and writing files outside the project")
+    step("files outside the project never reach a PDF, until allowed")
+    app.TRUST_FILE = tmp / "trust.json"                 # not the real one in ~/.cache
     ver = subprocess.run(["pdflatex", "--version"], capture_output=True, text=True).stdout.splitlines()[0]
-    (tmp / "secret.txt").write_text("SECRET-OUTSIDE-THE-PROJECT", encoding="utf-8")
-    outside = {
-        "read": "\\documentclass{article}\\begin{document}\\input{../secret.txt}\\end{document}\n",
-        "write": "\\documentclass{article}\\newwrite\\w\\immediate\\openout\\w=../written.txt "
-                 "\\immediate\\write\\w{x}\\immediate\\closeout\\w\\begin{document}x\\end{document}\n",
-    }
-    for what, doc in outside.items():
-        folder = tmp / what
-        folder.mkdir()
-        (folder / "main.tex").write_text(doc, encoding="utf-8")
-        app.S = app.State(folder, folder / "main.tex", "pdf", None)
-        res = app.compile_tex()
-        done = res["ok"] if what == "read" else (tmp / "written.txt").exists()
-        if not done:
-            print(f"{what}: refused, as it should be ({ver})")
-            continue
-        # Defence in depth that depends on the TeX version: report it, don't fail. To tell TeX's behaviour
-        # from the app's settings, run pdflatex directly too.
-        env = dict(os.environ, openin_any="p", openout_any="p")
-        direct = subprocess.run(["pdflatex", "-interaction=nonstopmode", "-halt-on-error", "main.tex"], cwd=folder,
-                                env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                                stdin=subprocess.DEVNULL, timeout=300)
-        said = [ln.strip() for ln in (direct.stdout + direct.stderr).splitlines()
-                if "../" in ln or "Not reading" in ln or "Not writing" in ln or ln.startswith("!")][:5]
-        msg = (f"LaTeX can {what} files outside the project on {ver}. Plain pdflatex with openin_any=p: "
-               f"exit {direct.returncode}, {' | '.join(said) or 'no messages'}")
-        print("WARNING:", msg)
-        if os.environ.get("GITHUB_ACTIONS") == "true":
-            print(f"::warning title=LaTeX can {what} outside the project::{msg}", flush=True)
+    secret = tmp / "secret.txt"
+    secret.write_text("SECRET-OUTSIDE-THE-PROJECT", encoding="utf-8")
+    peek = tmp / "read"
+    peek.mkdir()
+    (peek / "main.tex").write_text("\\documentclass{article}\\begin{document}\\input{../secret.txt}\\end{document}\n",
+                                   encoding="utf-8")
+    app.S = app.State(peek, peek / "main.tex", "pdf", None)
+    res = app.compile_tex()
+    assert not res["ok"] and not (peek / "main.pdf").exists(), "a file from outside the project reached the PDF"
+    listed = [f["path"] for f in (res.get("blocked") or {}).get("files", [])]
+    assert any(p.endswith("secret.txt") for p in listed), res
+    print("blocked:", listed, f"({ver})")
+    app.trust_project(files=app.S.outside_found)        # what "Allow" does
+    res = app.compile_tex()
+    assert res["ok"] and (peek / "main.pdf").exists(), res["errors"]
+    print("compiles once allowed")
+
+    step("documents can't write outside the project")
+    poke = tmp / "write"
+    poke.mkdir()
+    (poke / "main.tex").write_text("\\documentclass{article}\\newwrite\\w\\immediate\\openout\\w=../written.txt "
+                                   "\\immediate\\write\\w{x}\\immediate\\closeout\\w\\begin{document}x\\end{document}\n",
+                                   encoding="utf-8")
+    app.S = app.State(poke, poke / "main.tex", "pdf", None)
+    app.compile_tex()
+    assert not (tmp / "written.txt").exists(), "LaTeX wrote a file outside the project"
+    print("refused")
+
+    step("a document can't pick LuaLaTeX by itself")
+    lua = tmp / "lua"
+    lua.mkdir()
+    (lua / "main.tex").write_text("% !TEX program = lualatex\n\\documentclass{article}\\begin{document}x\\end{document}\n",
+                                  encoding="utf-8")
+    app.S = app.State(lua, lua / "main.tex", "pdf", None)
+    res = app.compile_tex()
+    assert not res["ok"] and (res.get("blocked") or {}).get("kind") == "lualatex", res
+    print("asks first")
+
+    step("biber (which can download) doesn't run after outside reads")
+    guard = [sys.executable, str(ROOT / "latex_copilot" / "texsafety.py"), "biber", "main.bcf"]
+    env = dict(os.environ, LATEX_COPILOT_ROOT=str(peek), LATEX_COPILOT_TRUST=str(tmp / "no-trust.json"))
+    (peek / "main.fls").write_text(f"PWD {peek}\nINPUT {secret}\n", encoding="utf-8")
+    run = subprocess.run(guard, cwd=peek, env=env, capture_output=True, text=True)
+    assert run.returncode == 3 and "didn't run biber" in run.stderr, (run.returncode, run.stderr)
+    (peek / "main.fls").write_text(f"PWD {peek}\nINPUT {peek / 'main.tex'}\n", encoding="utf-8")
+    run = subprocess.run(guard, cwd=peek, env=env, capture_output=True, text=True)
+    assert run.returncode != 3, run.stderr
+    print("guarded")
     app.S = app.State(proj, proj / "main.tex", "pdf", None)
 
     step("SyncTeX: source -> PDF -> source")

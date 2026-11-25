@@ -1,0 +1,81 @@
+# Publishes a release when a version tag (v1.2.3) is pushed. The tests run on all three systems first; then
+# the release gets the installers (set to install exactly this version), the app as a zip, and SHA-256
+# checksums; finally the release's own installer is tried, the way the README says to install.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    uses: ./.github/workflows/test.yml
+
+  publish:
+    needs: tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag must match the app's version
+        run: |
+          v="$(python3 -c 'import re; print(re.search(r"__version__ = \"(.+?)\"", open("latex_copilot/__init__.py").read()).group(1))')"
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::The tag $GITHUB_REF_NAME doesn't match the app's version ($v)"; exit 1
+          fi
+      - name: Build
+        run: |
+          ./make-dist.sh
+          mkdir release
+          cp dist/latex-copilot-*.zip release/
+          # The installers attached to a release install that release.
+          python3 - <<'PY'
+          import os
+          tag = os.environ["GITHUB_REF_NAME"]
+          for name, old, new in (("install.sh", 'REF="${LATEX_COPILOT_REF:-main}"', 'REF="${LATEX_COPILOT_REF:-%s}"' % tag),
+                                 ("install.ps1", '} else { "main" }', '} else { "%s" }' % tag)):
+              s = open(name, encoding="utf-8").read()
+              assert s.count(old) == 1, f"{name}: the default version line has changed"
+              open(f"release/{name}", "w", encoding="utf-8", newline="").write(s.replace(old, new))
+          PY
+          cd release && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          base="https://github.com/$REPO/releases/download/$GITHUB_REF_NAME"
+          cat > notes.md <<NOTES
+          **Install or update**
+
+          - macOS, Linux, WSL: \`curl -fsSL $base/install.sh | bash\`
+          - Windows (PowerShell): \`irm $base/install.ps1 | iex\`
+
+          These install exactly this version. SHA-256 checksums of the attached files are in \`SHA256SUMS.txt\`.
+          NOTES
+          # A draft until every file is attached, so nobody downloads a half-published release.
+          gh release create "$GITHUB_REF_NAME" release/* --draft --verify-tag --title "Latex-Copilot ${GITHUB_REF_NAME#v}" \
+            --notes-file notes.md --generate-notes
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+
+  try-it:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install from the release, as the README says
+        env:
+          LATEX_COPILOT_SKIP_PREREQS: "1"   # just the app: the tests job has already checked TeX and the rest
+        run: |
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/latest/download/install.sh" | bash
+          "$HOME/.local/bin/latex-copilot" --version | tee /dev/stderr | grep -qx "latex-copilot ${GITHUB_REF_NAME#v}"
+      - name: The checksums match
+        run: |
+          mkdir r && cd r
+          for f in install.sh install.ps1 SHA256SUMS.txt; do
+            curl -fsSLO "https://github.com/${{ github.repository }}/releases/download/$GITHUB_REF_NAME/$f"
+          done
+          grep -E " (install\.sh|install\.ps1)$" SHA256SUMS.txt | sha256sum -c
