@@ -36,7 +36,7 @@ Then it installs the app and a `latex-copilot` command, and finishes with `latex
 The app itself needs no admin rights: it lives in `~/.local/share/latex-copilot` (Windows: `%LOCALAPPDATA%\latex-copilot`).
 Installing TeX and the other tools asks for your password (macOS, Linux) or for permission (Windows).
 
-Afterwards, **open a new terminal**. The installer offers to sign you in to Claude straight away (it opens your browser). If you skip that, Latex-Copilot shows a **Sign in** button in its chat panel. It uses your own Claude account (Pro, Max, Team or Enterprise, or an Anthropic Console account), so there's no API key to manage.
+The installer also adds a **Latex-Copilot app icon**: in Launchpad and Spotlight (macOS), the Start menu and the desktop (Windows), or the applications menu (Linux). The installer offers to sign you in to Claude straight away (it opens your browser). If you skip that, Latex-Copilot shows a **Sign in** button in its chat panel. It uses your own Claude account (Pro, Max, Team or Enterprise, or an Anthropic Console account), so there's no API key to manage.
 
 - **From a copy** of this repository (a git clone or the zip): run `./install.sh` (macOS, Linux), or double-click `install.cmd` (Windows).
 - **To update:** run the installer again. When a new version is out, Latex-Copilot shows **Update** in its toolbar.
@@ -47,13 +47,17 @@ Afterwards, **open a new terminal**. The installer offers to sign you in to Clau
 
 ## Use
 
+**From the app icon:** click **Latex-Copilot**. It asks which folder to work in, in your system's own folder window, where you can also make a new folder for a new project. Then it opens in your browser. A new, empty folder offers to import a PDF or start a blank document. Picking a folder that's already open just shows it again. When you close its browser tab, Latex-Copilot stops by itself a couple of minutes later (never in the middle of a Claude edit or a PDF import). On macOS, the first time, the system may ask whether Latex-Copilot may use the folder you picked: allow it.
+
+**From a terminal:**
+
 ```bash
 cd path/to/your/latex/project
 latex-copilot
 ```
 
 Your browser opens Latex-Copilot at `http://127.0.0.1:8765`. Leave the terminal open while you work, and press **Ctrl+C** in it to stop.
-The link it opens includes an access key, so other programs and other users on the computer can't use it. If you open the page some other way and it says so, use the link printed in the terminal.
+The link it opens includes an access key, so other programs and other users on the computer can't use it. If you open the page some other way and it says so, use the link printed in the terminal (or start it again from the app icon).
 Latex-Copilot finds the main document (the file with `\documentclass`) by itself. To pick a specific file, run `latex-copilot path/to/main.tex`.
 
 | Area | What you can do |
@@ -76,17 +80,18 @@ Claude rebuilds the document as LaTeX that looks like the original and is easy t
 
 - **Text stays text.** It comes from the PDF's own text layer, so the wording is exact, and Claude turns it into real headings, paragraphs, lists, tables, maths, footnotes and links.
 - **Figures become two layers.** Each figure is cut out as an image with its text removed (`figures/fig-02-1.png`), and its labels (axis titles, legends, callouts) are put back on top as real, editable text (`figures/fig-02-1.tex`).
-- **Designed pages** (covers, posters, forms) can use a positioned copy instead (`layers/page-01.tex`): the page's graphics with every line of text placed exactly where it was.
+- **Designed pages** (covers, posters, forms) can use a positioned copy instead (`layers/page-01.tex`): the page's graphics with each block of text placed exactly where it was.
+- **Clean source.** A final pass goes over the whole LaTeX as an experienced author would: one block of text per paragraph (never a line per line of the PDF), named styles instead of repeated formatting, a tidy, commented preamble. The app makes sure it changes nothing in the document: the wording must stay exactly the same (otherwise the pass is undone), and every page is compared before and after.
 - **Scanned pages** (no text layer) are read from the page images.
 
-How it works: the app first takes the PDF apart on your computer. It measures the page layout, fonts, colours, columns, tables and figures, and writes them into `import/extraction.md`, next to an image of every page. Claude then follows a written conversion process ([`latex_copilot/prompts/pdf-import.md`](latex_copilot/prompts/pdf-import.md)) a few pages at a time. After each part the app compiles the result, and, if **Check the result against the original** is ticked, Claude compares each compiled page with the original and fixes differences. When it's done, the **Original** button (or **O**) switches the PDF pane between your new document and the PDF you imported.
+How it works: the app first takes the PDF apart on your computer. It measures the page layout, fonts, colours, columns, tables and figures, and writes them into `import/extraction.md`, next to an image of every page. Claude then follows a written conversion process ([`latex_copilot/prompts/pdf-import.md`](latex_copilot/prompts/pdf-import.md)) a few pages at a time. After each part the app compiles the result, and, if **Check the result against the original** is ticked, Claude compares each compiled page with the original and fixes differences. With **Clean up the LaTeX at the end** ticked, the final pass follows ([`latex_copilot/prompts/final-pass.md`](latex_copilot/prompts/final-pass.md)). When it's done, the **Original** button (or **O**) switches the PDF pane between your new document and the PDF you imported.
 
 Conversion uses your Claude account like any other request: the model chosen under the chat box does the work. Opus is the most faithful; Sonnet costs about half as much and suits long documents. A 10-page document takes a few minutes. Generated files the final document doesn't use are moved to `import/unused/`, and the `import/` folder can be deleted once you're happy.
 
 ### Options
 
 ```
-latex-copilot [PROJECT | MAIN.tex | FILE.pdf] [--engine pdf|xe|lua] [--model MODEL] [--port N] [--no-browser] [--latexmkrc] [--no-update-check]
+latex-copilot [PROJECT | MAIN.tex | FILE.pdf] [--engine pdf|xe|lua] [--model MODEL] [--port N] [--no-browser] [--latexmkrc] [--no-update-check] [--launch]
 ```
 
 - `--engine xe` or `--engine lua` compiles with XeLaTeX or LuaLaTeX. The default is pdfLaTeX. A first line `% !TEX program = xelatex` in the main file does the same for that document. A document that asks for LuaLaTeX this way (`% !TEX program = lualatex`) needs your OK first, in the PDF pane, because LuaLaTeX documents can run Lua code that changes your files.
@@ -94,6 +99,7 @@ latex-copilot [PROJECT | MAIN.tex | FILE.pdf] [--engine pdf|xe|lua] [--model MOD
 - `--port` sets the port. If 8765 is busy, it uses the next free one automatically.
 - `--latexmkrc` uses the project's `latexmkrc` file. It's off by default because a `latexmkrc` is a program that runs on every compile: only use it for projects you trust (for example ones that need `-shell-escape`).
 - `--no-update-check` stops the daily check for a new version (so does setting `LATEX_COPILOT_NO_UPDATE_CHECK=1`).
+- `--launch` starts it the way the app icon does: it asks for the folder in a window, and stops a couple of minutes after its browser tab is closed.
 
 ## Good to know
 

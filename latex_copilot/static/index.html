@@ -1028,7 +1028,9 @@ function updateEmpty(show = !pdfDoc) {
   }
   const name = esc(status.importSource || "the PDF");
   const checkBox = `<label class="check"><input type="checkbox" id="importCheck" ${store.get("importCheck", true) ? "checked" : ""}>
-    <span>Check the result against the original afterwards<br><small style="color:var(--muted)">Claude looks at each original page next to the compiled one and fixes differences. Costs a little more.</small></span></label>`;
+    <span>Check the result against the original afterwards<br><small style="color:var(--muted)">Claude looks at each original page next to the compiled one and fixes differences. Costs a little more.</small></span></label>
+    <label class="check"><input type="checkbox" id="importTidy" ${store.get("importTidy", true) ? "checked" : ""}>
+    <span>Clean up the LaTeX at the end<br><small style="color:var(--muted)">One block of text per paragraph, named styles, a tidy preamble. The wording stays exactly the same and the pages are compared before and after.</small></span></label>`;
   const fine = `<p class="fine">Uses the model chosen under the chat box: Opus is the most faithful, Sonnet costs about half as much and suits long documents.
     A 10-page document takes a few minutes. You'll see the progress in the chat.</p>`
     + (status.gs ? "" : `<p class="warn">Importing needs Ghostscript, which isn't installed. Ubuntu/Debian: <code>sudo apt install ghostscript</code> · macOS: <code>brew install ghostscript</code></p>`);
@@ -1056,7 +1058,7 @@ $("#empty").addEventListener("click", e => {
   else if (act === "convert") convertPending();
   else if (act === "blank") newBlank();
 });
-$("#empty").addEventListener("change", e => { if (e.target.id === "importCheck") store.set("importCheck", e.target.checked); });
+$("#empty").addEventListener("change", e => { if (["importCheck", "importTidy"].includes(e.target.id)) store.set(e.target.id, e.target.checked); });
 $("#importInput").onchange = e => { const f = e.target.files[0]; e.target.value = ""; if (f) importPdfFile(f); };
 $("#viewer").addEventListener("dragover", e => {
   if (status.mainExists || ![...e.dataTransfer.types].includes("Files")) return;
@@ -1118,7 +1120,8 @@ async function startImport(bytes, name) {
     throw new Error(/password/i.test(e.name + e.message) ? "the PDF is password-protected." : "couldn't read the PDF (" + e.message + ").");
   }
   const check = $("#importCheck") ? $("#importCheck").checked : store.get("importCheck", true);
-  await api("/api/import/start", { body: { text, check, model: $("#model").value, effort: $("#effort").value } });
+  const tidy = $("#importTidy") ? $("#importTidy").checked : store.get("importTidy", true);
+  await api("/api/import/start", { body: { text, check, tidy, model: $("#model").value, effort: $("#effort").value } });
   pollChat();
 }
 

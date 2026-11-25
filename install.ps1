@@ -158,8 +158,11 @@
     }
 
     # ------------------------------------------------------------------ uninstall
+    $Shortcuts = @([Environment]::GetFolderPath("Programs"), [Environment]::GetFolderPath("Desktop")) |
+        Where-Object { $_ } | ForEach-Object { Join-Path $_ "Latex-Copilot.lnk" }
     if ($Uninstall) {
         if (Test-Path $Prefix) { Remove-Item -Recurse -Force $Prefix }
+        foreach ($lnk in $Shortcuts) { if (Test-Path $lnk) { Remove-Item -Force $lnk } }
         Remove-UserPath $BinDir
         Write-Host "latex-copilot removed. (Its logs and deleted-file backups are in $env:USERPROFILE\.cache\latex-copilot if you want those gone too.)"
         return
@@ -281,6 +284,25 @@
     }
     Say "app:     $AppDir"
     Say "command: $Launcher  (using $($py.Exe))"
+
+    # The app icon: Start-menu and desktop shortcuts that ask for the project folder and open the browser.
+    # They run pythonw, which has no console window.
+    $pyw = Join-Path (Split-Path $py.Exe) "pythonw.exe"
+    if (Test-Path $pyw) {
+        $wsh = New-Object -ComObject WScript.Shell
+        foreach ($path in $Shortcuts) {
+            $lnk = $wsh.CreateShortcut($path)
+            $lnk.TargetPath = $pyw
+            $lnk.Arguments = '-X utf8 "' + (Join-Path $AppDir "latex_copilot\launch.pyw") + '"'
+            $lnk.WorkingDirectory = $env:USERPROFILE
+            $lnk.IconLocation = (Join-Path $AppDir "latex_copilot\static\icon.ico") + ",0"
+            $lnk.Description = "Latex-Copilot: a LaTeX editor with Claude built in"
+            $lnk.Save()
+        }
+        Say "app icon: Latex-Copilot, in the Start menu and on the desktop"
+    } else {
+        Warn "There's no pythonw.exe next to $($py.Exe), so no Start-menu icon; the latex-copilot command works all the same."
+    }
     Write-Host ""
 
     Bold "Checking the setup..."
@@ -290,10 +312,9 @@
     $checked = ($LASTEXITCODE -eq 0)
     $ErrorActionPreference = $saved
     Write-Host ""
-    Bold "Done. Open a new terminal (so it finds the latex-copilot command), then run:"
-    Say "cd path\to\your\latex\project"
-    Say "latex-copilot"
-    Say "or, to rebuild a PDF as LaTeX:  latex-copilot path\to\file.pdf"
+    Bold "Done. Start Latex-Copilot from the Start menu or the desktop icon; it asks which folder to work in."
+    Say "Or open a new terminal and run:  cd path\to\your\latex\project ; latex-copilot"
+    Say "To rebuild a PDF as LaTeX:  latex-copilot path\to\file.pdf"
     if (-not $checked) {
         Say "Something above is still missing. Run this installer again, or install it yourself (see the README)."
         Say "Not signed in to Claude yet? Latex-Copilot's chat panel has a Sign in button."

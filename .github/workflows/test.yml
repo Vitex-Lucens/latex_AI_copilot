@@ -136,6 +136,43 @@ jobs:
         run: |
           "$HOME/.local/bin/latex-copilot" --version | grep -E "^latex-copilot [0-9]"
           "$HOME/.local/bin/latex-copilot" --check || true   # reports Claude Code missing on CI
+      # ---- the app icon each installer makes (its folder dialog needs a person, so it isn't opened here)
+      - name: app icon (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          f="$HOME/.local/share/applications/latex-copilot.desktop"
+          cat "$f"
+          grep -qx "Exec=\"$HOME/.local/bin/latex-copilot\" --launch" "$f"
+          test -f "$HOME/.local/share/icons/hicolor/256x256/apps/latex-copilot.png"
+          if command -v desktop-file-validate >/dev/null; then desktop-file-validate "$f"; fi
+      - name: app icon (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          app="$HOME/Applications/Latex-Copilot.app"
+          plutil -lint "$app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print CFBundleName" "$app/Contents/Info.plist" | grep -qx "Latex-Copilot"
+          codesign --verify --deep --strict "$app"
+          osadecompile "$app/Contents/Resources/Scripts/main.scpt" | tee /dev/stderr | grep -q -- "--launch"
+          cmp "$app/Contents/Resources/applet.icns" "$HOME/.local/share/latex-copilot/latex_copilot/static/icon.icns"
+      - name: app icon (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $wsh = New-Object -ComObject WScript.Shell
+          foreach ($dir in @([Environment]::GetFolderPath("Programs"), [Environment]::GetFolderPath("Desktop"))) {
+            $lnk = $wsh.CreateShortcut((Join-Path $dir "Latex-Copilot.lnk"))
+            Write-Host "$dir : $($lnk.TargetPath) $($lnk.Arguments) | icon $($lnk.IconLocation)"
+            if ($lnk.TargetPath -notmatch "pythonw\.exe$" -or -not (Test-Path $lnk.TargetPath)) {
+              Write-Host "::error title=Windows shortcut::no working shortcut in $dir"
+              exit 1
+            }
+          }
+          # what the shortcut runs starts the app (--version here, so no folder dialog)
+          $python = Join-Path (Split-Path $lnk.TargetPath) "python.exe"
+          $out = & $python -X utf8 "$env:LOCALAPPDATA\latex-copilot\app\latex_copilot\launch.pyw" --version
+          Write-Host $out
+          if ("$out" -notmatch "latex-copilot \d") { Write-Host "::error title=launch.pyw::$out"; exit 1 }
+
       # ---- the one-line installs, exactly as in the README (this commit, downloaded from GitHub)
       - name: one-line install (macOS, Ubuntu)
         if: runner.os != 'Windows' && github.event_name == 'push'

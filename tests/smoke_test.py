@@ -234,6 +234,38 @@ def main():
         server.terminate()
         server.wait(timeout=30)
 
+    step("started like an app (--launch): opens the folder, shows it again if it's open, stops when idle")
+    folder = tmp / "launched"
+    folder.mkdir()
+    port = free_port()
+    env = dict(os.environ, PYTHONPATH=str(ROOT), LATEX_COPILOT_IDLE_EXIT="4")
+    first = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "latex_copilot", "--launch", str(folder),
+                              "--no-browser", "--port", str(port)], env=env)
+    try:
+        status = wait_for_server(port, first)
+        assert Path(status["root"]) == folder.resolve(), status["root"]
+        again = subprocess.run([sys.executable, "-X", "utf8", "-m", "latex_copilot", "--launch", str(folder),
+                                "--no-browser"], env=env, capture_output=True, text=True, timeout=120)
+        assert again.returncode == 0 and "Already open" in again.stdout, (again.returncode, again.stdout, again.stderr)
+        first.wait(timeout=60)                                 # no browser tab: it stops by itself
+        print("opened, shown again, stopped when idle")
+    finally:
+        if first.poll() is None:
+            first.terminate()
+            raise AssertionError("the launched app didn't stop when idle")
+
+    step("final pass helpers: comparing the wording and the pages before and after")
+    words = app.words_of("A well-\nknown fox waited a few min-\nutes.")
+    assert app.wording_change(words, app.words_of("A well-known fox waited a few minutes.")) == ""
+    assert "fox" in app.wording_change(words, app.words_of("A well-known cat waited a few minutes."))
+    assert "second paragraph" in app.pdf_text(proj / "main.pdf")
+    a = app.page_renders(proj / "main.pdf", tmp, "a", 40)
+    b = app.page_renders(proj / "main.pdf", tmp, "b", 40)
+    assert a and not app.page_differs(a[1], b[1])
+    app.side_by_side(a[1], b[1], tmp / "compare.png")
+    assert (tmp / "compare.png").read_bytes().startswith(b"\x89PNG")
+    print("ok")
+
     shutil.rmtree(tmp, ignore_errors=True)
     print("\nAll smoke tests passed.")
 

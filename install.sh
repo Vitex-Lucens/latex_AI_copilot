@@ -7,7 +7,8 @@
 #
 # It installs whatever is missing (Python 3.10+, TeX with latexmk, Ghostscript, Claude Code), asking
 # before each step, then the app itself: into ~/.local/share/latex-copilot, with a `latex-copilot`
-# command in ~/.local/bin. Run it again at any time to update. The app needs no admin rights; installing
+# command in ~/.local/bin and an app icon (macOS: ~/Applications; Linux: the applications menu) that asks
+# for the project folder and opens the browser, no terminal needed. Run it again at any time to update. The app needs no admin rights; installing
 # TeX and the other tools asks for your password.
 #
 # Settings (environment variables):
@@ -46,8 +47,9 @@ ask() {
 }
 
 if [ "${1:-}" = "--uninstall" ]; then
-  rm -rf "$PREFIX"
-  rm -f "$LAUNCHER"
+  rm -rf "$PREFIX" "$HOME/Applications/Latex-Copilot.app"
+  rm -f "$LAUNCHER" "$HOME/.local/share/applications/latex-copilot.desktop" \
+        "$HOME/.local/share/icons/hicolor/256x256/apps/latex-copilot.png"
   echo "latex-copilot removed. (Its logs and deleted-file backups are in ~/.cache/latex-copilot if you want those gone too.)"
   exit 0
 fi
@@ -144,6 +146,10 @@ prereqs_linux() {
   { tex_ok && kpsewhich tcolorbox.sty >/dev/null 2>&1; } || pkgs+=(texlive-latex-extra texlive-fonts-recommended tex-gyre lmodern latexmk)
   have gs || pkgs+=(ghostscript)
   have curl || pkgs+=(curl)
+  # the app icon's folder dialog, on a desktop that lacks one
+  if [ -z "$WSL" ] && [ -n "${XDG_CURRENT_DESKTOP:-}${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && ! have zenity && ! have kdialog; then
+    pkgs+=(zenity)
+  fi
   [ ${#pkgs[@]} -eq 0 ] && return 0
   if have apt-get; then
     bold "Missing: ${pkgs[*]}"
@@ -190,6 +196,69 @@ claude_signin
 find_python || true
 [ -n "$PY" ] || fail "Python 3.10 or newer is needed. macOS: brew install python · Ubuntu/Debian: sudo apt install python3 (on Ubuntu 20.04, python3.10 from the deadsnakes PPA)."
 
+# ------------------------------------------------------------------------- the app icon
+# Start Latex-Copilot without a terminal: from ~/Applications (macOS: Launchpad, Spotlight) or the applications
+# menu (Linux). It asks for the project folder with the system's folder dialog, then opens the browser.
+as_text() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }     # for an AppleScript string
+desktop_app() {
+  if [ "$PLATFORM" = mac ]; then
+    local apps="$HOME/Applications" app="$HOME/Applications/Latex-Copilot.app" script
+    script="$(mktemp -t latex-copilot).applescript"
+    cat > "$script" <<APPLESCRIPT
+on run
+	set launcher to "$(as_text "$LAUNCHER")"
+	set prompt to "Choose the folder for your LaTeX project. To start a new project, make a New Folder."
+	set startAt to ""
+	try
+		set startAt to do shell script quoted form of launcher & " --last-folder"
+	end try
+	try
+		if startAt is "" then
+			set chosen to choose folder with prompt prompt
+		else
+			set chosen to choose folder with prompt prompt default location (POSIX file startAt as alias)
+		end if
+	on error number -128
+		return
+	end try
+	do shell script quoted form of launcher & " --launch " & quoted form of (POSIX path of chosen) & " > /dev/null 2>&1 &"
+end run
+APPLESCRIPT
+    mkdir -p "$apps"
+    rm -rf "$app"
+    if osacompile -o "$app" "$script" >/dev/null 2>&1; then
+      cp "$PREFIX/latex_copilot/static/icon.icns" "$app/Contents/Resources/applet.icns"
+      plutil -replace CFBundleName -string "Latex-Copilot" "$app/Contents/Info.plist" 2>/dev/null || true
+      plutil -replace CFBundleIdentifier -string "org.vitexlucens.latex-copilot" "$app/Contents/Info.plist" 2>/dev/null || true
+      codesign --force --deep --sign - "$app" >/dev/null 2>&1 || true     # re-sign after the new icon
+      touch "$app"
+      note "app icon: ~/Applications/Latex-Copilot.app (also in Launchpad and Spotlight)"
+    else
+      warn "Couldn't make the Latex-Copilot app in ~/Applications; the latex-copilot command works all the same."
+    fi
+    rm -f "$script"
+  elif [ -z "$WSL" ]; then
+    local apps="$HOME/.local/share/applications" icons="$HOME/.local/share/icons/hicolor/256x256/apps"
+    mkdir -p "$apps" "$icons"
+    cp "$PREFIX/latex_copilot/static/app-icon.png" "$icons/latex-copilot.png"
+    cat > "$apps/latex-copilot.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Latex-Copilot
+Comment=LaTeX editor with Claude built in
+Exec="$LAUNCHER" --launch
+Icon=latex-copilot
+Terminal=false
+Categories=Office;Publishing;
+Keywords=LaTeX;TeX;PDF;Claude;
+StartupNotify=false
+DESKTOP
+    update-desktop-database "$apps" >/dev/null 2>&1 || true
+    gtk-update-icon-cache -q -t "$HOME/.local/share/icons/hicolor" >/dev/null 2>&1 || true
+    note "app icon: Latex-Copilot, in your applications menu"
+  fi
+}
+
 # ------------------------------------------------------------------------- the app
 bold "Installing Latex-Copilot…"
 mkdir -p "$BIN_DIR"
@@ -217,6 +286,7 @@ if [ -d "$HOME/.local/share/tex-annotator" ] || [ -f "$BIN_DIR/tex-annotator" ];
 fi
 note "app:     $PREFIX"
 note "command: $LAUNCHER  (using $PY)"
+desktop_app
 echo
 
 # ~/.local/bin on PATH for new terminals (Claude Code's installer puts `claude` there too)
@@ -245,9 +315,15 @@ bold "Checking the setup…"
 CHECK=0
 "$LAUNCHER" --check || CHECK=$?
 echo
-bold "Done. To start, open a new terminal and run:"
-note "cd path/to/your/latex/project && latex-copilot"
-note "or, to rebuild a PDF as LaTeX:   latex-copilot path/to/file.pdf"
+if [ "$PLATFORM" = mac ]; then
+  bold "Done. Start Latex-Copilot from Launchpad or Spotlight; it asks which folder to work in."
+elif [ -z "$WSL" ]; then
+  bold "Done. Start Latex-Copilot from your applications menu; it asks which folder to work in."
+else
+  bold "Done."
+fi
+note "Or in a new terminal:  cd path/to/your/latex/project && latex-copilot"
+note "To rebuild a PDF as LaTeX:   latex-copilot path/to/file.pdf"
 if [ "$CHECK" != 0 ]; then
   note "Something above is still missing. Run this installer again, or install it yourself (see the README)."
   note "Not signed in to Claude yet? Latex-Copilot's chat panel has a Sign in button."

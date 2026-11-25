@@ -38,7 +38,8 @@ import time
 import traceback
 import urllib.request
 import webbrowser
-from collections import defaultdict
+import unicodedata
+from collections import Counter, defaultdict
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -46,9 +47,10 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 try:
     from . import __version__
-    from . import pdf_import, texsafety
+    from . import launcher, pdf_import, texsafety
 except ImportError:  # run as a plain script
     __version__ = "dev"
+    import launcher  # type: ignore[no-redef]
     import pdf_import  # type: ignore[no-redef]
     import texsafety  # type: ignore[no-redef]
 
@@ -63,6 +65,7 @@ TRASH = CACHE / "trash"
 TRUST_FILE = CACHE / "trust.json"   # what the user allowed per project (outside every project, out of Claude's reach)
 REPO = "Vitex-Lucens/latex_AI_copilot"
 UPDATE: dict = {}                   # {"version", "url"} when a newer release is out
+ACTIVITY: dict = {}                 # "seen": a request came in (started from the app icon, the app stops when idle)
 
 # Files the editor (and Claude's undo tracking) treat as editable text.
 TEXT_EXTS = {".tex", ".bib", ".sty", ".cls", ".bst", ".cfg", ".txt", ".md", ".dtx", ".ins", ".csv", ".dat"}
@@ -1132,6 +1135,196 @@ def compile_and_fix(session: str | None, run) -> tuple[dict, str | None]:
     return comp, session
 
 
+# --------------------------------------------------------------------------- #
+# PDF import: the final pass
+# --------------------------------------------------------------------------- #
+FINAL_DPI = 50       # renders for spotting pages that look different after the final pass
+SHOW_DPI = 90        # what Claude sees: the page before and after, side by side
+FINAL_PAGES = 40     # pages compared at most
+SHOW_PAGES = 8       # pages shown to Claude at most
+
+
+def pdf_text(pdf: Path) -> str:
+    out = pdf.with_name(pdf.stem + "-text.txt")
+    pdf_import.run_gs(["-sDEVICE=txtwrite", "-o", str(out), str(pdf)])
+    try:
+        return out.read_text(encoding="utf-8", errors="replace")
+    finally:
+        out.unlink(missing_ok=True)
+
+
+def words_of(text: str) -> list[str]:
+    """A document's words and punctuation, for comparing two versions of it: where its lines break, and words
+    hyphenated across lines, don't matter."""
+    t = unicodedata.normalize("NFKC", text).replace("\u00ad", "")
+    t = re.sub(r"[-\u2010\u2011]\s*\n\s*", "", t)            # a word hyphenated across two lines
+    t = re.sub(r"[-\u2010\u2011]", "", t)                       # hyphens anywhere (one may end up at a line end)
+    return re.findall(r"\w+|[^\w\s]", t)
+
+
+def rejoin_splits(whole: Counter, parts: Counter):
+    """Take out words that one version has whole and the other hyphenated across a line break ("minutes" vs
+    "min" + "utes"): in columns, the text extraction needn't put the two halves next to each other."""
+    for w in list(whole):
+        while whole[w] > 0:
+            for i in range(2, len(w) - 1):                     # TeX leaves at least two letters on each side
+                a, b = w[:i], w[i:]
+                if parts[a] > 0 and parts[b] > (a == b):
+                    whole[w] -= 1
+                    parts[a] -= 1
+                    parts[b] -= 1
+                    break
+            else:
+                break
+
+
+def wording_change(before: list[str], after: list[str]) -> str:
+    """'' if the wording is the same (in whatever order the text extraction gives it), else what changed."""
+    gone, new = Counter(before) - Counter(after), Counter(after) - Counter(before)
+    rejoin_splits(gone, new)
+    rejoin_splits(new, gone)
+    gone, new = +gone, +new
+    if before == after or not (gone or new):
+        return ""
+
+    def show(c: Counter) -> str:
+        return ", ".join(f"“{w}”" + (f" ×{n}" if n > 1 else "") for w, n in c.most_common(20))
+    return "; ".join(x for x in (f"missing now: {show(gone)}" if gone else "", f"new: {show(new)}" if new else "") if x)
+
+
+def page_renders(pdf: Path, folder: Path, tag: str, dpi: int, first: int = 1, last: int = FINAL_PAGES) -> dict[int, Path]:
+    paths = pdf_import.render_ppm(pdf, folder, tag, dpi, first, last)
+    return {first + i: p for i, p in enumerate(paths) if p.exists()}
+
+
+def page_differs(a: Path, b: Path) -> bool:
+    """Whether two renders of a page differ visibly (more than 0.2% of the pixels clearly different)."""
+    ra, rb = pdf_import.Raster(a, 1, 1), pdf_import.Raster(b, 1, 1)
+    if (ra.w, ra.h) != (rb.w, rb.h):
+        return True
+    limit, bad = ra.w * ra.h * 0.002, 0
+    for y in range(ra.h):
+        x, z = ra.row(y), rb.row(y)
+        if x == z:
+            continue
+        bad += sum(1 for i in range(0, len(x), 3)
+                   if max(abs(x[i] - z[i]), abs(x[i + 1] - z[i + 1]), abs(x[i + 2] - z[i + 2])) > 60)
+        if bad > limit:
+            return True
+    return False
+
+
+def side_by_side(before: Path, after: Path, out: Path):
+    a, b = pdf_import.Raster(before, 1, 1), pdf_import.Raster(after, 1, 1)
+    gap = 16
+    blank_a, blank_b, sep = b"\xff" * (a.w * 3), b"\xff" * (b.w * 3), b"\x99" * (gap * 3)
+    rows = ((a.row(y) if y < a.h else blank_a) + sep + (b.row(y) if y < b.h else blank_b) for y in range(max(a.h, b.h)))
+    pdf_import.write_png(out, a.w + gap + b.w, max(a.h, b.h), rows, SHOW_DPI)
+
+
+def restore_snapshot(snap: dict[str, str]):
+    """Put the project's text files back as they were (and remove ones made since)."""
+    for p in text_files():
+        if str(p) not in snap:
+            p.unlink(missing_ok=True)
+    for path, text in snap.items():
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(text, encoding="utf-8")
+
+
+def final_pass(model, effort) -> bool:
+    """The PDF import's last step: Claude goes over the finished LaTeX to make it clean and easy to edit (one
+    block of text per paragraph, named styles, an orderly preamble) without changing the document. The wording
+    must come out the same, or the pass is undone; pages that look different afterwards go back to Claude, before
+    and after side by side. Returns whether the cleaned-up version was kept."""
+    work = S.import_dir / "final-pass"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    before_pdf = work / "before.pdf"
+    shutil.copy2(S.pdf, before_pdf)
+    before_words = words_of(pdf_text(before_pdf))
+    before = page_renders(before_pdf, work, "before", FINAL_DPI)
+    snap = take_snapshot()
+    system = system_prompt((PROMPTS / "final-pass.md").read_text(encoding="utf-8"))
+
+    def run(prompt, resume=None):
+        try:
+            (CACHE / "last-prompt.md").write_text(prompt, encoding="utf-8")
+        except OSError:
+            pass
+        return run_claude(prompt, [], resume=resume, model=model, effort=effort, system=system)
+
+    def wording() -> str:
+        return wording_change(before_words, words_of(pdf_text(S.pdf))) if S.pdf.exists() else "it didn't compile"
+
+    def undo(why: str) -> bool:
+        restore_snapshot(snap)
+        compile_tex(force=True)
+        log(f"Kept the LaTeX from before the final pass, because {why}.", "info")
+        return False
+
+    try:
+        S.progress = "Claude is cleaning up the LaTeX…"
+        log("Final pass: cleaning up the LaTeX so it's easy to read and edit, without changing the document…", "status")
+        files = [rel(p) for p in text_files() if p.suffix == ".tex" and not rel(p).startswith(("figures/", "import/"))]
+        ok, _, session = run("Do the final pass described in your instructions. The document's files: "
+                             + ", ".join(files) + ".")
+        if S.cancelled:
+            return undo("it was stopped")
+        if not ok:
+            return undo("Claude couldn't finish it")
+        comp, session = compile_and_fix(session, run)
+        if not comp["ok"]:
+            return undo("it didn't compile afterwards")
+        change = wording()
+        if change and session and not S.cancelled:
+            S.progress = "Claude is putting the original wording back…"
+            log("The wording changed in places; asking Claude to put it back…", "status")
+            _, _, s2 = run(f"The wording changed in the final pass ({change}). Put it back exactly as it was, "
+                           "keeping your other clean-ups.", session)
+            session = s2 or session
+            comp, session = compile_and_fix(session, run)
+            change = wording()
+        if change:
+            return undo(f"the wording would have changed ({change[:300]})")
+
+        after = page_renders(S.pdf, work, "after", FINAL_DPI)
+        changed = [n for n in sorted(set(before) | set(after))
+                   if n not in before or n not in after or page_differs(before[n], after[n])]
+        if changed and session and not S.cancelled:
+            shown = changed[:SHOW_PAGES]
+            hb = page_renders(before_pdf, work, "show-before", SHOW_DPI, shown[0], shown[-1])
+            ha = page_renders(S.pdf, work, "show-after", SHOW_DPI, shown[0], shown[-1])
+            images = []
+            for n in shown:
+                if n in hb and n in ha:
+                    out = work / f"page-{n:02d}.png"
+                    side_by_side(hb[n], ha[n], out)
+                    images.append(rel(out))
+            count = (f" The document now has {len(after)} pages instead of {len(before)}." if len(after) != len(before)
+                     and len(before) < FINAL_PAGES else "")
+            if images:
+                S.progress = "Claude is comparing the pages before and after…"
+                log(f"Comparing {len(changed)} page{'s' * (len(changed) != 1)} that changed with how they looked before…",
+                    "status")
+                _, _, s2 = run("These pages look different after your clean-up. Each image shows a page before (left) "
+                               f"and after (right): {', '.join(images)}.{count} Lines breaking in different places inside "
+                               "a paragraph is fine. Anything else that changed (fonts, sizes, colours, spacing between "
+                               "blocks, positions, what's on which page) should look like before again: fix it in the "
+                               "source, keeping it clean. If a page only differs in its line breaks, leave it.", session)
+                comp, _ = compile_and_fix(s2 or session, run)
+                change = wording()
+                if change:
+                    return undo(f"the wording would have changed ({change[:300]})")
+        log("Final pass done: the LaTeX is cleaned up, with the same wording"
+            + (f"; Claude compared the {len(changed)} page{'s' * (len(changed) != 1)} that changed with before." if changed
+               else " and the same pages."), "info")
+        return True
+    finally:
+        for p in work.glob("*.ppm"):
+            p.unlink(missing_ok=True)
+
+
 GENERATED = re.compile(r"^(figures/fig-\d+-\d+\.(png|tex)|layers/page-\d+\.tex|figures/original-graphics\.pdf)$")
 
 
@@ -1258,6 +1451,9 @@ def import_worker(payload: dict):
                 moved = []
             if moved:
                 log(f"Moved {len(moved)} generated file{'s' * (len(moved) != 1)} the document doesn't use to import/unused/.", "info")
+            if comp["ok"] and payload.get("tidy", True) and not S.cancelled:
+                final_pass(model, effort)
+                comp = S.last_compile
             if comp["ok"]:
                 log(f"Done: {name} is now main.tex. Use the Original button to compare it with the PDF you imported, "
                     "and mark up anything that's off.", "ok")
@@ -1370,6 +1566,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------------ GET
     def do_GET(self):
+        ACTIVITY["seen"] = True
         if not self.from_this_app():
             return self.send_json({"error": "Forbidden"}, 403)
         url = urlparse(self.path)
@@ -1405,6 +1602,7 @@ class Handler(BaseHTTPRequestHandler):
             src = import_source()
             return self.send_json({
                 "project": S.root.name,
+                "root": str(S.root),
                 "main": rel(S.tex),
                 "mainExists": S.tex.exists(),
                 "importSource": src.get("name") if src else None,
@@ -1481,6 +1679,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ----------------------------------------------------------------- POST
     def do_POST(self):
+        ACTIVITY["seen"] = True
         # A JSON (or PDF) content type forces browsers to preflight cross-site requests, which this server never approves.
         ctype = self.headers.get("Content-Type") or ""
         allowed = ctype.startswith("application/json") or (self.path == "/api/import/upload" and ctype.startswith("application/pdf"))
@@ -1859,13 +2058,59 @@ def check_for_update():
               f"  {UPDATE['url']}\n")
 
 
+def pick_project(given: str | None) -> Path | None:
+    """--launch: the project folder, from the system's folder dialog unless one was given. None: cancelled."""
+    folder = given
+    while True:
+        if not folder:
+            folder = launcher.choose_folder(launcher.last_folder())
+            if folder is None:
+                launcher.message("Latex-Copilot couldn't show a folder dialog. On Linux, install zenity "
+                                 "(sudo apt install zenity), or run latex-copilot in a terminal, in your project folder.")
+                return None
+            if not folder:
+                return None                                  # cancelled
+        p = Path(folder).expanduser().resolve()
+        if p == Path.home() or p == Path(p.anchor):
+            launcher.message(f"{p} is your whole home folder. Choose a folder just for this project, or make a new one.")
+            folder = None
+            continue
+        if not p.exists():
+            p.mkdir(parents=True)                            # a new folder typed into the dialog
+        launcher.remember(p if p.is_dir() else p.parent)
+        return p
+
+
+def idle_watchdog(server):
+    """--launch: there's no terminal to stop the app from, so it stops once no browser tab has had it open for two
+    minutes (LATEX_COPILOT_IDLE_EXIT seconds), but never during a Claude edit or a PDF import. It counts its own
+    ticks rather than the clock, so time a laptop spends asleep doesn't count."""
+    try:
+        limit = float(os.environ.get("LATEX_COPILOT_IDLE_EXIT", "120"))
+    except ValueError:
+        limit = 120.0
+    tick = max(0.5, min(10.0, limit / 6))
+    idle = 0.0
+    while True:
+        time.sleep(tick)
+        if ACTIVITY.pop("seen", False) or S.job.get("state") == "running":
+            idle = 0.0
+            continue
+        idle += tick
+        if idle >= limit:
+            slog("no browser tab has had the app open for a while: stopping")
+            server.shutdown()
+            return
+
+
 def main():
     global S, TOKEN
+    no_console = launcher.console_fallback()             # the Windows shortcut runs pythonw, which has no console
     # Print progress immediately even when stdout isn't a terminal.
     sys.stdout.reconfigure(line_buffering=True, errors="replace")
     sys.stderr.reconfigure(line_buffering=True, errors="replace")
     ap = argparse.ArgumentParser(prog="latex-copilot", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("project", nargs="?", default=".", help="Project folder or main .tex file (default: current folder)")
+    ap.add_argument("project", nargs="?", default=None, help="Project folder or main .tex file (default: current folder)")
     ap.add_argument("--port", type=int, default=8765, help="Port for the local web page (default 8765; the next free one is used if taken)")
     ap.add_argument("--engine", choices=["pdf", "xe", "lua"], default="pdf", help="LaTeX engine: pdflatex (default), xelatex or lualatex")
     ap.add_argument("--model", default=None, help="Claude model to use (default: your Claude Code default)")
@@ -1874,13 +2119,34 @@ def main():
                     help="Use the project's latexmkrc. It's Perl code that runs on every compile: only for projects you trust")
     ap.add_argument("--no-update-check", action="store_true",
                     help="Don't ask GitHub once a day whether a newer version is out (or set LATEX_COPILOT_NO_UPDATE_CHECK=1)")
+    ap.add_argument("--launch", action="store_true",
+                    help="Start like an app (what the app icon runs): ask for the project folder in a window, open the "
+                         "browser, and stop a couple of minutes after its tab is closed")
+    ap.add_argument("--last-folder", action="store_true", help=argparse.SUPPRESS)   # for the macOS app's dialog
     ap.add_argument("--check", action="store_true", help="Check that the required tools are installed, then exit")
     ap.add_argument("--version", action="version", version=f"latex-copilot {__version__}")
     args = ap.parse_args()
     if args.check:
         sys.exit(0 if check_requirements() else 1)
 
-    target = Path(args.project).expanduser().resolve()
+    if args.last_folder:
+        print(launcher.last_folder() or "")
+        return
+    if args.launch:
+        launcher.prepare(no_console)
+        target = pick_project(args.project)
+        if target is None:
+            return
+        TOKEN = load_token()
+        port = launcher.find_running(target, TOKEN) if target.is_dir() else None
+        if port:                                         # already open: show it again
+            slog(f"{target} is already open on port {port}")
+            print(f"Already open: http://127.0.0.1:{port}/")
+            if not args.no_browser:
+                open_browser(f"http://127.0.0.1:{port}/?token={TOKEN}")
+            return
+    else:
+        target = Path(args.project or ".").expanduser().resolve()
     if target.is_file() and target.suffix.lower() == ".pdf":
         root = project_for_pdf(target)
         tex = find_main(root) or root / "main.tex"
@@ -1923,6 +2189,8 @@ def main():
     if server is None:
         sys.exit("Could not find a free port.")
     server.daemon_threads = True
+    launcher.register(root, port)                        # so the app icon finds this folder already open
+    atexit.register(launcher.unregister, root)
 
     url = f"http://127.0.0.1:{port}/?token={TOKEN}"     # the page keeps the key in a cookie and drops it from the address
     slog(f"serving at http://127.0.0.1:{port}/")              # not the key: logs get shared when asking for help
@@ -1935,6 +2203,8 @@ def main():
         threading.Timer(0.5, open_browser, args=(url,)).start()
     if not (args.no_update_check or os.environ.get("LATEX_COPILOT_NO_UPDATE_CHECK")):
         threading.Thread(target=check_for_update, daemon=True).start()
+    if args.launch:
+        threading.Thread(target=idle_watchdog, args=(server,), daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

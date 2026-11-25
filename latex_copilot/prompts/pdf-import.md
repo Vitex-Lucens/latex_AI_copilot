@@ -40,7 +40,9 @@ say that in LaTeX.
      semantically, so the text reflows when edited. This is the default.
    - *Designed pages* (covers, posters, flyers, certificates, slides, forms; pages where position is the
      point): use the positioned copy, on a page of its own: `\newpage\thispagestyle{empty}\input{layers/page-NN}\newpage`.
-     You may tidy it (for example one node per paragraph with a `text width`), but keep the positions.
+     Then make each paragraph one node with a `text width` and its alignment, instead of one node per line,
+     keeping the positions, and drop the `\makebox[…][s]` that stretches each line to the original's width
+     (with a stand-in font it spreads the words apart).
      The document's paper size must then match the original's.
    - Mixed documents are normal: a designed cover followed by flowing pages.
    - A page without a usable text layer (the extraction says so) must be transcribed from its high-resolution
@@ -64,6 +66,8 @@ say that in LaTeX.
      it for projects the user trusts.
 
 4. **Body: go through the extraction block by block.**
+   - One paragraph of the original is one paragraph in the source: continuous text, with no `\\`,
+     `\newline` or blank line where the PDF's lines happened to end.
    - Text verbatim: keep the wording, numbering, capitalisation and punctuation. Escape LaTeX's special
      characters (`\ { } $ & # ^ _ % ~`). Rejoin hyphenated line ends (`-|`). Keep the original's quotes and
      dashes.
