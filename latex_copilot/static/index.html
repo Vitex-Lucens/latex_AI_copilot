@@ -238,7 +238,9 @@
   #composeRow2 { display: flex; gap: 6px; align-items: center; }
   #composeRow2 select { height: 28px; font-size: 12.5px; padding: 0 6px; flex: 1 1 0; min-width: 0; }
   #composeRow2 #send { flex: none; }
-  #ctxMeter { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #chatHead > * { flex-shrink: 0; }
+  #ctxMeter { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap;
+    flex-shrink: 1 !important; min-width: 0; overflow: hidden; text-overflow: ellipsis; }   /* gives way before the buttons */
   #ctxMeter.warn { color: #d97706; font-weight: 600; }
 
   /* ---- Claude connection ---- */
@@ -1850,8 +1852,8 @@ function updateMeter(j) {
   m.textContent = `${(j.contextTokens / 1000).toFixed(1)}k context · $${j.chatCost.toFixed(2)}`;
   const long = j.contextTokens > LONG_CHAT;
   m.classList.toggle("warn", long);
-  m.title = long ? "This conversation is long, so every message re-sends a lot of it. Start a New chat when you switch topics to keep replies cheaper and faster."
-                 : "How much conversation Claude re-reads with each message, and what this chat has used so far";
+  m.title = m.textContent + " · " + (long ? "This conversation is long, so every message re-sends a lot of it. Start a New chat when you switch topics to keep replies cheaper and faster."
+                 : "How much conversation Claude re-reads with each message, and what this chat has used so far");
   if (long && !warnedLong) {
     warnedLong = true;
     note(`This conversation is now ${Math.round(j.contextTokens / 1000)}k tokens, and every message re-sends it. Press New chat when you move on to something else to keep replies cheaper.`, "info");
