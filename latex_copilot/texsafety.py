@@ -29,8 +29,9 @@ from pathlib import Path
 TEX_DIR = re.compile(r"^(texmf.*|texlive|miktex|\.?tinytex|\.?fonts|fontconfig)$", re.I)
 FONT_EXTS = {".otf", ".ttf", ".ttc", ".otc", ".dfont", ".pfb", ".pfa", ".pfm", ".afm", ".tfm", ".ofm", ".vf",
              ".ovf", ".enc", ".map", ".woff", ".woff2"}
-# What older TeX Live prints when openin_any=p stops a read.
-REFUSED = re.compile(r"Not reading from (.+?) \(openin_any = p\)")
+# When older TeX Live's openin_any=p stops a read, some versions say so; LaTeX then reports the file as missing.
+REFUSED = re.compile(r"Not reading from (.+?) \(openin_any = p\)|LaTeX Error: File `(.+?)' not found")
+TRIED_EXTS = ("", ".tex", ".pdf", ".png", ".jpg", ".jpeg", ".eps")   # what \input and \includegraphics add
 _ROOTS: list[str] | None = None
 
 
@@ -100,12 +101,17 @@ def recorded(fls: Path) -> list[tuple[str, str]]:
 
 
 def refused(output: str, cwd: Path) -> list[tuple[str, str]]:
-    """Reads that older TeX Live refused (openin_any=p), from TeX's output: still worth showing, so they can be allowed."""
+    """Reads that older TeX Live refused (openin_any=p), from TeX's output: a file reported missing that does
+    exist. Worth listing all the same, so the user can allow it."""
     out = []
     for m in REFUSED.finditer(output):
-        path = real(os.path.join(cwd, m.group(1)))
-        if os.path.isfile(path) and ("read", path) not in out:
-            out.append(("read", path))
+        name = m.group(1) or m.group(2)
+        for ext in TRIED_EXTS:
+            path = real(os.path.join(cwd, name + ext))
+            if os.path.isfile(path):
+                if ("read", path) not in out:
+                    out.append(("read", path))
+                break
     return out
 
 

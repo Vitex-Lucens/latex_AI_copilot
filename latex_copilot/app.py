@@ -378,6 +378,7 @@ def compile_tex() -> dict:
         # Older TeX Live stops reads outside the project itself; TeX Live 2026 and MiKTeX don't, which the check
         # below covers. Not once the user has allowed files outside the project, as TeX would refuse those.
         env["openout_any"] = "p"
+        env["max_print_line"] = "1000"     # long file names in messages stay on one line
         if not trust.get("files"):
             env["openin_any"] = "p"
     with S.compile_lock:
