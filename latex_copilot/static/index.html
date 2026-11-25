@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Latex-Copilot</title>
-<link rel="icon" href="/icon.png">
+<link rel="icon" href="/icon.png?v=2">
 <script>
   // Apply the theme before first paint.
   (function () {
@@ -56,7 +56,7 @@
   header { display: flex; gap: 6px; align-items: center; padding: 7px 10px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   header .title { font: 600 14px system-ui; margin: 0 6px 0 4px; white-space: nowrap; }
   header .logo { width: 24px; height: 24px; border-radius: 6px; flex: none; margin-left: 2px; }
-  .welcome .logo { width: 56px; height: 56px; border-radius: 12px; float: right; margin: 0 0 8px 12px; }
+  .welcome .brand { display: block; width: 240px; max-width: 80%; margin: 0 auto 16px; border-radius: 10px; }
   header .title small { font: 400 12.5px system-ui; color: var(--muted); margin-left: 4px; }
   header .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
   .spacer { flex: 1; }
@@ -288,7 +288,7 @@
 <div id="app">
 <header>
   <button id="toggleTree" class="icon" title="Show/hide the file tree"><i data-icon="panelLeft"></i></button>
-  <img class="logo" src="/icon.png" alt="">
+  <img class="logo" src="/icon.png?v=2" alt="">
   <span class="title" id="docName">Latex-Copilot</span>
   <span class="sep"></span>
   <button id="saveCompile" class="primary" title="Save all and recompile (Ctrl+S)"><i data-icon="play"></i><span class="lbl">Recompile</span></button>
@@ -1037,12 +1037,12 @@ function updateEmpty(show = !pdfDoc) {
       <p>Follow along in the chat. Claude reads the extracted text and the page images and writes the LaTeX a few pages at a time; the app compiles it${store.get("importCheck", true) ? " and Claude checks it against the original" : ""}.</p>
       <p>The document opens here when it's done. Press Stop in the chat to cancel.</p></div>`;
   } else if (status.importSource) {
-    el.innerHTML = `<div class="welcome" id="welcome"><img class="logo" src="/icon.png" alt=""><h2>Rebuild ${name} as LaTeX</h2>
+    el.innerHTML = `<div class="welcome" id="welcome"><img class="brand" src="/logo.png" alt="Latex-Copilot"><h2>Rebuild ${name} as LaTeX</h2>
       <p>Claude rebuilds the PDF as an editable LaTeX document: text as real text, tables as tables, maths as maths, and figures as images with their labels as editable text on top.</p>
       <div class="actions"><button class="primary" data-act="convert" ${status.gs ? "" : "disabled"}>${icon("play")}Convert to LaTeX</button>
         <button data-act="import">${icon("fileImport")}Choose another PDF…</button></div>${checkBox}${fine}</div>`;
   } else {
-    el.innerHTML = `<div class="welcome" id="welcome"><img class="logo" src="/icon.png" alt=""><h2>No LaTeX document here yet</h2>
+    el.innerHTML = `<div class="welcome" id="welcome"><img class="brand" src="/logo.png" alt="Latex-Copilot"><h2>No LaTeX document here yet</h2>
       <p>Import a PDF and Claude rebuilds it as LaTeX: text as real text, tables as tables, maths as maths, and figures as images with their labels as editable text on top. Then edit it here like any other document.</p>
       <div class="actions"><button class="primary" data-act="import" ${status.gs ? "" : "disabled"}>${icon("fileImport")}Import a PDF…</button>
         <button data-act="blank">${icon("filePlus")}Start a blank document</button></div>${checkBox}

@@ -216,6 +216,7 @@ def main():
         assert status["mainExists"] and status["pdfExists"], status
         assert "Latex-Copilot" in request(port, "/", key=False).decode("utf-8")      # the page shell is public
         assert request(port, "/pdf-extract.js", key=False).startswith(b"//")
+        assert request(port, "/logo.png", key=False).startswith(b"\x89PNG")             # the logo, for the start page
         code, _, body = request(port, "/api/status", key=False, full=True)
         assert code == 403 and b"locked" in body, (code, body)                       # data needs the key
         code, _, _ = request(port, "/api/compile", {}, key=False, full=True)
